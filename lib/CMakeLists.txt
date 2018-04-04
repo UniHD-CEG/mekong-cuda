@@ -1,5 +1,7 @@
 set(LLVM_NO_RTTI 1)
 
+add_subdirectory(Analysis/isl)
+
 #add_llvm_library(Mekong OBJECT
 #  Mekong.cpp
 #  IslBuilder.cpp
@@ -57,5 +59,4 @@ set_target_properties(LLVMMekong
   PROPERTIES
   LINKER_LANGUAGE CXX
   PREFIX "")
-
-add_subdirectory(Analysis/isl)
+target_link_libraries(LLVMMekong LLVMisl)
