@@ -741,7 +741,6 @@ struct Expr {
   void dump() const { print(dbgs()); }
 
   bool matches(Value *V) {
-    errs() << "Match V: " << *V << "\n";
     if (Val && V == Val) {
       assert(Kind == EK_VALUE || Kind == EK_INSTRUCTION || Kind == EK_ARGUMENT);
       PossibleMatches.insert(Val);
@@ -778,7 +777,6 @@ struct Expr {
   }
 
   bool matches(Instruction *I) {
-    errs() << "Match I: " << *I << "\n";
     if (Kind == EK_CONSTANT || Kind == EK_ARGUMENT)
       return false;
     if (Val && I == Val) {
@@ -834,10 +832,6 @@ struct Expr {
     // TODO
     for (unsigned OpIdx = 0; OpIdx < NumRequiredOperands; OpIdx++)
       if (!OperandMatches[OpIdx].count(OpIdx)) {
-        I->dump();
-        errs() << "Fail: " << OpIdx <<"\n";
-        for (auto &It : OperandMatches[OpIdx])
-          errs() << " - " << It << "\n";
         return false;
       }
 
@@ -918,7 +912,6 @@ void PolyhedralAccessInfo::detectKnownComputations(Function &F) {
 }
 
 void PolyhedralAccessInfo::extractComputations(Function &F) {
-  errs() << "\n\nEXTRACT COMPUTATIONS:\n\n";
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   for (BasicBlock &BB : F) {
@@ -1053,30 +1046,11 @@ void PolyhedralAccessInfo::extractComputations(Function &F) {
                           [](Instruction *) { return true; }, nullptr);
       PS->finalize(PI, PACCs, DL);
 
-      errs() << "\nFound computation:\n\t";
-      E->dump();
-      errs() << "\nAccesses:\n";
       for (auto &ArrayInfoIt : PS->ArrayInfoMap) {
         for (auto &MultiDimAccessIt : ArrayInfoIt.second->AccessMultiDimMap) {
           Value *AccessInst = MultiDimAccessIt.first->getPEXP()->getValue();
-          if (isa<StoreInst>(AccessInst))
-            errs() << "\t- "
-                   << std::string(" ",MaxLoadName - 4) << "ROOT:\t"
-                   << MultiDimAccessIt.second << "\n";
-          else
-            errs() << "\t- "
-                   << std::string(" ",
-                                  MaxLoadName - AccessInst->getName().size())
-                   << AccessInst->getName() << ":\t" << MultiDimAccessIt.second
-                   << "\n";
         }
       }
-      errs() << "Recurrences:\n";
-      for (std::pair<PHINode *, const PEXP *> &RecurrenceIt : Recurrences) {
-        errs() << "\t- " << RecurrenceIt.first->getName() << ":\t"
-               << RecurrenceIt.second << "\n";
-      }
-      errs() << "\n";
       //delete E;
       delete PS;
     }
