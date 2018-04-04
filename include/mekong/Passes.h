@@ -19,8 +19,9 @@ namespace llvm {
 
 namespace mekong {
   llvm::Pass *createMeKernelAnalysis();
-  llvm::Pass *createMeKernelAnalysisWrapper(llvm::StringRef Model);
+  llvm::Pass *createMeKernelAnalysisWrapper(llvm::StringRef File);
   llvm::Pass *createMeCodegen();
+  llvm::Pass *createMeCodegen(llvm::StringRef File);
   llvm::Pass *createMeKernelSubgrid();
 }
 

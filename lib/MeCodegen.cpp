@@ -141,9 +141,14 @@ struct IteratorDebugInfo {
 struct MeCodegen : public ModulePass {
   static char ID;
   static AnalysisKey Key;
-  MeCodegen() : ModulePass(ID)
-  {}
+  MeCodegen() : ModulePass(ID) {
+    modelFile = mekong::ModelFile;
+  }
+  MeCodegen(StringRef File) : ModulePass(ID) {
+    modelFile = File;
+  }
 
+  std::string modelFile;
   mekong::App app;
   std::vector<std::pair<std::string, std::string>> builds_in_c;
   std::vector<IteratorDebugInfo> iteratorDebugInfo;
@@ -190,7 +195,7 @@ struct MeCodegen : public ModulePass {
     // reuse function if already found
     Function *F = M.getFunction(Name.getSingleStringRef());
     if (F == nullptr) {
-      F = Function::Create(IteratorFType::get(C), Function::ExternalLinkage, Name, &M);
+      F = Function::Create(IteratorFType::get(C), Function::InternalLinkage, Name, &M);
     }
 
     auto *EntryBB = BasicBlock::Create(C, "entry", F);
@@ -553,7 +558,7 @@ struct MeCodegen : public ModulePass {
     // reuse function if already found
     Function *F = M.getFunction(Name.getSingleStringRef());
     if (F == nullptr) {
-      F = Function::Create(DispatcherFType::get(C), Function::ExternalLinkage, Name, &M);
+      F = Function::Create(DispatcherFType::get(C), Function::InternalLinkage, Name, &M);
     }
 
     auto *abortFType = TypeBuilder<void(void), false>::get(C);
@@ -594,10 +599,11 @@ struct MeCodegen : public ModulePass {
     if (M.getTargetTriple() == "nvptx64-nvidia-cuda" ||
         M.getTargetTriple() == "nvptx-nvidia-cuda")
       return false;
-    if (mekong::ModelFile == "")
+
+    if (modelFile == "")
       return false;
 
-    deserialize(mekong::ModelFile);
+    deserialize(modelFile);
 
     SmallVector<Function*,8> generatedIterators;
 
@@ -726,9 +732,12 @@ char MeCodegen::ID = 0;
 
 // Pass registration
 
-//static RegisterPass<MeCodegen> X("me-codegen", "Mekong Iterator Host Code Generation", false, false);
 Pass *mekong::createMeCodegen() {
   return new MeCodegen();
+}
+
+Pass *mekong::createMeCodegen(StringRef File) {
+  return new MeCodegen(File);
 }
 
 INITIALIZE_PASS_BEGIN(MeCodegen, "me-codegen",

@@ -578,7 +578,7 @@ struct MeKernelAnalysisWrapper : public ModulePass {
   static AnalysisKey Key;
 
   MeKernelAnalysisWrapper() : ModulePass(ID) {
-    modelFile = "";
+    modelFile = mekong::ModelFile;
   }
   MeKernelAnalysisWrapper(StringRef File) : ModulePass(ID) {
      modelFile = File;
@@ -605,11 +605,9 @@ struct MeKernelAnalysisWrapper : public ModulePass {
     }
 
     if (modelFile != "") {
-      serialize(mekong::ModelFile);
+      serialize(modelFile);
     }
-    if (mekong::ModelFile != "") {
-      serialize(mekong::ModelFile);
-    }
+
     return false;
   }
 
