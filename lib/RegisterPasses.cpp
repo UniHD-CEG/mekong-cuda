@@ -14,7 +14,7 @@ using namespace mekong;
 
 static cl::opt<std::string>
     MekongModel("mekong-model", cl::desc("Mekong model"),
-        cl::init(""));
+        cl::init(""), cl::ZeroOrMore);
 
 static cl::opt<bool>
     MekongPreEnabled("mekong-pre", cl::desc("Enable mekong pre-processing"),
@@ -48,7 +48,7 @@ static llvm::RegisterStandardPasses RegisterEarlyMekong(
     registerEarlyMekongPasses);
 
 static llvm::RegisterStandardPasses RegisterLateMekong(
-    llvm::PassManagerBuilder::EP_VectorizerStart,
+    llvm::PassManagerBuilder::EP_OptimizerLast,
     registerLateMekongPasses);
 
 void initializeMekongPasses(llvm::PassRegistry &Registry) {
