@@ -26,26 +26,30 @@ static cl::opt<bool>
 
 namespace mekong {
 
-void registerMekongPasses(llvm::legacy::PassManagerBase &PM) {
-  if (MekongPreEnabled) {
-    PM.add(mekong::createMeKernelAnalysisWrapper(MekongModel));
-  }
+// These passes should profit from all standard optimization
+static void registerEarlyMekongPasses(const llvm::PassManagerBuilder &Builder,
+    llvm::legacy::PassManagerBase &PM) {
   if (MekongEnabled) {
     PM.add(mekong::createMeCodegen(MekongModel));
     PM.add(mekong::createMeKernelSubgrid());
   }
 }
 
-static void
-registerMekongPassesEarly(const llvm::PassManagerBuilder &Builder,
+// These passes should work on optimized (and canonicalized) IR
+static void registerLateMekongPasses(const llvm::PassManagerBuilder &Builder,
     llvm::legacy::PassManagerBase &PM) {
-  registerMekongPasses(PM);
+  if (MekongPreEnabled) {
+    PM.add(mekong::createMeKernelAnalysisWrapper(MekongModel));
+  }
 }
 
-static llvm::RegisterStandardPasses RegisterMekongEarly(
-    //llvm::PassManagerBuilder::EP_ModuleOptimizerEarly,
+static llvm::RegisterStandardPasses RegisterEarlyMekong(
+    llvm::PassManagerBuilder::EP_ModuleOptimizerEarly,
+    registerEarlyMekongPasses);
+
+static llvm::RegisterStandardPasses RegisterLateMekong(
     llvm::PassManagerBuilder::EP_VectorizerStart,
-    registerMekongPassesEarly);
+    registerLateMekongPasses);
 
 void initializeMekongPasses(llvm::PassRegistry &Registry) {
   //initializePolyhedralValueInfoWrapperPassPass(Registry);
