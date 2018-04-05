@@ -46,3 +46,20 @@ else ()
     LLVMVectorize
     )
 endif()
+
+find_package(CUDAH)
+
+add_library(mekongrt STATIC
+  Runtime/src/me-runtime.cpp
+  )
+target_include_directories(mekongrt PUBLIC
+  Runtime/include
+  ${CUDAH_INCLUDE_DIRS}
+  )
+install(TARGETS mekongrt
+  DESTINATION lib)
+
+file(COPY Runtime/include/me-runtime.h
+  DESTINATION ${LLVM_BINARY_DIR}/include/mekong)
+install(FILES ${LLVM_BINARY_DIR}/include/mekong/me-runtime.h
+  DESTINATION include/mekong)
