@@ -47,7 +47,7 @@ else ()
     )
 endif()
 
-find_package(CUDAH)
+find_package(CUDAh)
 
 add_library(mekongrt STATIC
   Runtime/src/me-runtime.cpp
