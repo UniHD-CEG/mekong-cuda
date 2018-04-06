@@ -6,7 +6,7 @@ index b654b8c..1a94986 100644
  add_llvm_external_project(llgo)
  add_llvm_external_project(lld)
  add_llvm_external_project(lldb)
-+add_llvm_external_project(mekong)
++add_llvm_external_project(mekong-cuda)
  
  # Automatically add remaining sub-directories containing a 'CMakeLists.txt'
  # file as external projects.
