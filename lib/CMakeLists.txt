@@ -49,15 +49,22 @@ endif()
 
 find_package(CUDAh)
 
-add_library(mekongrt STATIC
-  Runtime/src/me-runtime.cpp
+add_custom_command(OUTPUT "${LLVM_BINARY_DIR}/lib/libmekongrt.bc"
+  COMMAND bin/clang++
+    -std=c++11 -O3
+    "-I${CMAKE_CURRENT_SOURCE_DIR}/Runtime/include"
+    --cuda-host-only
+    -c -emit-llvm
+    -o lib/libmekongrt.bc
+    "${CMAKE_CURRENT_SOURCE_DIR}/Runtime/src/me-runtime.cu"
+  
+  WORKING_DIRECTORY "${LLVM_BINARY_DIR}"
+  DEPENDS Runtime/src/me-runtime.cu clang
+  VERBATIM
   )
-target_include_directories(mekongrt PUBLIC
-  Runtime/include
-  ${CUDAH_INCLUDE_DIRS}
+add_custom_target(libmekongrt ALL DEPENDS
+  "${LLVM_BINARY_DIR}/lib/libmekongrt.bc"
   )
-install(TARGETS mekongrt
-  DESTINATION lib)
 
 file(COPY Runtime/include/me-runtime.h
   DESTINATION ${LLVM_BINARY_DIR}/include/mekong)
