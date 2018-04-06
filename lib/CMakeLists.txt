@@ -54,7 +54,7 @@ add_custom_command(OUTPUT "${LLVM_BINARY_DIR}/lib/libmekongrt.bc"
     -std=c++11 -O3
     "-I${CMAKE_CURRENT_SOURCE_DIR}/Runtime/include"
     --cuda-host-only
-    -c -emit-llvm
+    -c -emit-llvm -flto
     -o lib/libmekongrt.bc
     "${CMAKE_CURRENT_SOURCE_DIR}/Runtime/src/me-runtime.cu"
   
