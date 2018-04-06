@@ -1,0 +1,12 @@
+diff --git a/tools/CMakeLists.txt b/tools/CMakeLists.txt
+index b654b8c..1a94986 100644
+--- a/tools/CMakeLists.txt
++++ b/tools/CMakeLists.txt
+@@ -46,6 +46,7 @@ add_llvm_external_project(clang)
+ add_llvm_external_project(llgo)
+ add_llvm_external_project(lld)
+ add_llvm_external_project(lldb)
++add_llvm_external_project(mekong)
+ 
+ # Automatically add remaining sub-directories containing a 'CMakeLists.txt'
+ # file as external projects.
