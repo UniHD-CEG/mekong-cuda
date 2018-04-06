@@ -1,0 +1,417 @@
+#!/bin/sh
+_=[[
+if command -v luajit >/dev/null 2>&1; then
+  exec luajit "$0" "$@"
+fi
+if command -v lua >/dev/null 2>&1; then
+  exec lua "$0" "$@"
+fi
+echo 'requires lua or luajit in $PATH'
+exit 1
+]]
+
+local app = (arg[0]):match(".-([^%/]+)$")
+local script_dir = (arg[0]):match("(.-)[^%/]+$")
+package.path = script_dir .. "/../lib/lua/?.lua"
+local yaml = require('yaml')
+local pprint = require('pprint')
+
+local function printf(msg, ...)
+  print(string.format(msg, ...))
+end
+
+local function logf(msg, ...)
+  io.stderr:write(string.format(msg, ...) .. "\n")
+end
+
+-------------------------------------------------------------------------------
+-- naming conventions
+-------------------------------------------------------------------------------
+
+local function _kernel_name(kernel)
+  return string.format("__%s_subgrid", kernel)
+end
+
+local function _kernel_iterator(kernel, array, mode)
+  assert(mode == "read" or mode == "write", "only read and write iterators supported")
+  return string.format("__%s_%d_%s", kernel, array, mode)
+end
+
+-------------------------------------------------------------------------------
+-- substitution functions
+-------------------------------------------------------------------------------
+
+local function substitute_function(str, from, to)
+  -- match function name + maybe whitespace + balanced parentheses (captured)
+  local pat = "%f[_a-zA-Z0-9]" .. from .. "%s*(%b())";
+  -- replace with new name + balanced parentheses with content
+  str, num = string.gsub(str, pat, function(parens)
+    return to .. parens
+  end)
+  --logf("%d function substitutions (%s)", num, from)
+  return str
+end
+
+local function substitute_kernel_launch(str, fn)
+  -- syntax: $IDENTIFIER \s* <<< $CONFIG >>> \s* ( $PARAMETERS )
+  local PATTERN = "(".."([_a-zA-Z][_a-zA-Z0-9]*)" .. -- start + identifier
+                  "%s*<<<%s*(.-)%s*>>>%s*" ..        -- kernel grid configuration
+                  "(%b())"..")%s*;"                   -- balanced parentheses (contains kernel arguments) + stop
+  local CHECK = "[^()%[%]{}]"
+  str, num = string.gsub(str, PATTERN, function(whole, name, grid, args)
+    args = string.sub(args, 2, -2) -- remove parentheses arounds kernel arguments
+    -- check if there are any forms of braces in any of the lists
+    assert(string.match(grid, CHECK), "unsupported kernel grid configuration")
+    assert(string.match(args, CHECK), "unsupported kernel arguments")
+
+    -- split arguments to gridConfig into list
+    local grid = string.split(grid, ",")
+    -- split arguments to kernel into list
+    local args = string.split(args, ",")
+
+    return fn(whole, name, grid, args)
+  end)
+  --logf("%d kernel substitutions", num)
+  return str
+end
+
+local function substitute_kernel_decl(str, fn)
+  -- syntax: __global__%s+ $TYPE %s+ $NAME +%s ( $PARAMETERS )
+  local ID = "[_a-zA-Z][_a-zA-Z0-9]*"
+  local PATTERN = "(".."__global__%s+"..ID.."%s+("..ID..")%s*(%b())"..")"
+  str, num = string.gsub(str, PATTERN, function(whole, name, args)
+    args = string.sub(args, 2, -2) -- remove parentheses arounds kernel arguments
+    -- kernel argument list can not contain commas, so no check necessary
+    args = string.split(args, ",")
+    return fn(whole, name, args)
+  end)
+  return str
+end
+
+local function substitute_include(str, fn)
+  local PATTERN = "(#include%s(%S+))";
+  str, num = string.gsub(str, PATTERN, function(whole, include)
+    return fn(whole, include)
+  end)
+  return str
+end
+
+-- translate typename from llvm ir to C
+local function irttoc(llvmname)
+  -- basic types
+  local simple = {
+    ["i8"] = "char",
+    ["i16"] = "short",
+    ["i32"] = "int",
+    ["i64"] = "int64_t",
+    ["half"] = "half",
+    ["float"] = "float",
+    ["double"] = "double",
+    ["fp128"] = "__float128",
+  }
+  if simple[llvmname] then
+    return simple[llvmname]
+  end
+  -- simple pointer types
+  local ptrt = string.match(llvmname, "^[_a-zA-Z0-9]+[*]$")
+  if ptrt then
+    return ptrt
+  end
+  -- struct pointer types
+  local strptrt = string.match(llvmname, "^%%struct.([_a-zA-Z0-9]+[*])$")
+  if strptrt then
+    return strptrt 
+  end
+  error("unsupported llvm type: " .. llvmname)
+end
+
+-------------------------------------------------------------------------------
+-- string extensions
+-------------------------------------------------------------------------------
+
+-- split string by ','
+string.split = function(self, sep)
+  local sep, fields = sep or ',', {}
+  local pattern = string.format("%%s*([^%s]+)%%s*", sep)
+  string.gsub(self, pattern, function(c) fields[#fields+1] = c end)
+  return fields
+end
+
+-- template strings
+string.template = function(self, env)
+  -- {{fn ... }} -> interprets text after 'fn' as a function body.
+  -- The function is executed and can use write(...) and print(...)
+  -- to generate output that replaces the expression.
+  self, _ = string.gsub(self, " *{{fn%s+(.-)}}", function(fnstr)
+    local fn = assert(loadstring(fnstr))
+    local buf = ""
+    local function fakeWrite(...)
+      for _, val in ipairs({...}) do
+        buf = buf .. tostring(val)
+      end
+    end
+    local fnenv = setmetatable({
+      write = fakeWrite,
+      print = function(...) fakeWrite(...) fakeWrite("\n") end,
+      pairs = pairs,
+      ipairs = ipairs,
+    }, { __index = env })
+    setfenv(fn, fnenv)
+    fn()
+    return buf
+  end)
+  -- {{ expr }} -> replace expression by the string ... is evaluated to.
+  self, _ = string.gsub(self, "{{(.-)}}", function(m)
+    local fn = assert(loadstring("return " .. m))
+    setfenv(fn, env)
+    return tostring(fn())
+  end)
+  return self
+end
+
+-------------------------------------------------------------------------------
+-- CLI
+-------------------------------------------------------------------------------
+
+local inputfiles = {}
+local kernelinfos = {}
+
+local idx = 1
+while idx <= #arg do
+  local curr = arg[idx]
+  idx = idx + 1
+  if string.match(curr, "-info=(.*)") then
+    kernelinfos[#kernelinfos+1] = string.match(curr, "-info=(.*)")
+  else
+    inputfiles[#inputfiles+1] = curr
+  end
+end
+
+local usage = "usage: " .. app .." <cuda file>"
+
+if #inputfiles < 1 then
+  logf("error: no cuda input files")
+  logf(usage)
+  os.exit(1)
+end
+
+if #kernelinfos < 1 then
+  logf("warning: no kernel info files")
+end
+
+-------------------------------------------------------------------------------
+-- Program logic
+-------------------------------------------------------------------------------
+
+
+-- Load input files
+
+local contents = ""
+
+for _, filename in ipairs(inputfiles) do
+  local f, err = io.open(filename, "r")
+  if err ~= nil then
+    logf("error opening file '%s': %s", filename, err)
+    os.exit(1)
+  end
+  contents = contents .. f:read("*a")
+end
+
+-- Load kernel infos
+
+local kernels = {}
+for _, filename in ipairs(kernelinfos) do
+  local fcontents = io.open(filename):read('*a')
+  local info = yaml.eval(fcontents)
+  for idx, k in ipairs(info.kernels) do
+    kernels[k['name']] = k
+  end
+end
+
+-- Substitutions
+
+local subs = {
+  {"cudaMalloc",            "__meMalloc"},
+  {"cudaFree",              "__meFree"},
+  {"cudaMemcpy",            "__meMemcpy"},
+  {"cudaMemcpyAsync",       "__meMemcpyAsync"},
+  {"cudaGetDeviceCount",    "__meGetDeviceCount"},
+  {"cudaDeviceSynchronize", "__meDeviceSynchronize"}
+}
+for _, pair in ipairs(subs) do
+  contents = substitute_function(contents, pair[1], pair[2])
+end
+
+contents = substitute_kernel_launch(contents, function(orig, name, grid, args)
+  local kernel = kernels[name]
+  local env = {
+    name = name,
+    grid = grid,
+    args = args,
+    kernel = kernel,
+    fmt = string.format,
+    join = table.concat,
+
+    filterArgs = function(test)
+      local argIdx = 0
+      local idx = 0
+      local args = kernel['arguments']
+      return function ()
+        argIdx = argIdx + 1
+        while args[argIdx] ~= nil do
+          if test(args[argIdx]) then
+            idx = idx +  1
+            return idx, argIdx
+          end
+          argIdx = argIdx + 1
+        end
+        return nil
+      end
+    end,
+
+    count = function(list, test)
+      local n = 0
+      for _, v in pairs(list) do
+        if test(v) then n = n + 1 end
+      end
+      return n
+    end,
+
+    _kernel_name =_kernel_name, 
+    _kernel_iterator = _kernel_iterator,
+
+    _kernel_partition = function(name)
+      local scheme = kernel['partitioning']
+      if scheme == "linear:x" then
+        return "__me_partition_linear_x"
+      elseif scheme == "linear:y" then
+        return "__me_partition_linear_y"
+      elseif scheme == "linear:z" then
+        return "__me_partition_linear_z"
+      else
+        error("invalid partitioning scheme: " .. scheme)
+      end
+    end,
+
+    passArg = function(argName, arg, partition)
+      if not arg['is-pointer'] then
+        return argName
+      else
+        return string.format("(%s)__me_nth_array(%s, %s)", irttoc(arg['type-name']), argName, partition)
+      end
+    end,
+  }
+  return string.template([[
+
+// ++++++++ {{name}} <<< {{join(grid, ", ")}} >>> ({{join(args, ", ")}})
+  {
+    dim3 _me_grid = {{ grid[1] }};
+    dim3 _me_block = {{ grid[2] }};
+    size_t _me_shared = {{ grid[3] or 0 }};
+    cudaStream_t _me_stream = {{ grid[4] or 0 }};
+
+    __subgrid_t _me_subgrid;
+    int64_t _me_params[{{ count(kernel.arguments, function(x) return x['is-parameter'] end) }}];
+    _me_subgrid.full.zdim = _me_block.z;
+    _me_subgrid.full.ydim = _me_block.y;
+    _me_subgrid.full.xdim = _me_block.x;
+    int _me_ngpus = __me_num_gpus();
+
+    // populate params for polyhedral model
+    {{fn for idx, argIdx in filterArgs(function(x) return x['is-parameter'] end) do
+      print(fmt("    _me_params[%d] = (int64_t)%s;", idx-1, args[argIdx]))
+    end}}
+    // synchronize arrays read arrays
+    for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
+      {{ _kernel_partition(name) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
+      __me_itfn_t _me_iter = NULL;
+      int _me_elsize = 0;
+      {{fn for idx, argIdx in filterArgs(function(x) return (x['read-map'] or '') ~= '' end) do
+        print(fmt("      // synchronize reads for array %s", args[argIdx]))
+        print(fmt("      _me_iter = %s;", _kernel_iterator(name, argIdx-1, 'read')))
+        print(fmt("      _me_elsize = %s / 8;", kernel['arguments'][argIdx]['element-bitsize']))
+        print(fmt("      __me_buffer_sync(%s, _me_i, _me_iter, _me_elsize, &_me_subgrid, _me_params);", args[argIdx]))
+      end}}
+    }
+    // sync so buffers are up to date
+    __me_sync();
+
+    // launch kernels
+    for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
+      {{ _kernel_partition(name) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
+      unsigned int z = _me_subgrid.kernel.zmax - _me_subgrid.kernel.zmin;
+      unsigned int y = _me_subgrid.kernel.ymax - _me_subgrid.kernel.ymin;
+      unsigned int x = _me_subgrid.kernel.xmax - _me_subgrid.kernel.xmin;
+      cudaSetDevice(_me_i);
+      {{ _kernel_name(name) }}<<< dim3(x, y, z), _me_block, _me_shared, _me_stream >>>
+        ({{fn for idx, arg in ipairs(args) do
+           if idx > 1 then write(", ") end
+           write(passArg(arg, kernel['arguments'][idx], "_me_i"))
+         end}}, _me_subgrid.kernel);
+    }
+
+    // update writes (parallel to kernel execution)
+    for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
+      {{ _kernel_partition(name) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
+      __me_itfn_t _me_iter = NULL;
+      int _me_elsize = 0;
+      {{fn for idx, argIdx in filterArgs(function(x) return (x['write-map'] or '') ~= '' end) do
+        print(fmt("      // update writes for array %s", args[argIdx]))
+        print(fmt("      _me_iter = %s;", _kernel_iterator(name, argIdx-1, 'write')))
+        print(fmt("      _me_elsize = %s / 8;", kernel['arguments'][argIdx]['element-bitsize']))
+        print(fmt("      __me_buffer_update(%s, _me_i, _me_iter, _me_elsize, &_me_subgrid, _me_params);", args[argIdx]))
+      end}}
+    }
+    cudaSetDevice(0);
+    // wait for kernels to finish (necessary?)
+    __me_sync();
+  }
+// -------- {{name}} <<< {{join(grid, ", ")}} >>> ({{join(args, ", ")}})
+  ]], env)
+end)
+
+local firstInclude = true
+contents = substitute_include(contents, function(orig, include)
+  if firstInclude then
+    firstInclude = false
+    local decls = {}
+    for name, kernel in pairs(kernels) do
+      local kernelDecl = string.format("extern \"C\" __global__ void %s(", _kernel_name(name))
+      for _, arg in ipairs(kernel['arguments']) do
+        kernelDecl = kernelDecl .. irttoc(arg['type-name']) .. ", "
+      end
+      kernelDecl = kernelDecl .. " __subgrid_kernel_t) {}"
+      decls[#decls+1] = kernelDecl
+      for idx, arg in ipairs(kernel['arguments']) do
+        if arg['is-pointer'] then
+          decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
+            _kernel_iterator(name, idx-1, "read"));
+          decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
+          _kernel_iterator(name, idx-1, "write"));
+        end
+      end
+    end
+    local env = {
+      orig = orig,
+      decls = decls,
+    }
+    return string.template([[
+///// start mekong header
+#include <stdint.h>
+#include "me-runtime.h"
+
+// auto generated iterators etc
+
+{{fn for _, decl in ipairs(decls) do
+  print(decl, ";")
+end}}
+
+///// end mekong header
+
+{{ orig }}]], env)
+  else
+    return orig
+  end
+end)
+
+print(contents)
