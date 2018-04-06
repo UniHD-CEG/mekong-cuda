@@ -42,8 +42,8 @@ multiple GPUs, follow these steps:
 
 1. `$ mekongcc -mekong-pre -mekong-model=model.yaml -o /dev/null myapp.cu`
 2. `$ mekongrw -info=model.yaml myapp.cu > tmp.cu`
-3. `$ mekongcc -mekong -mekong-model=model.yaml -O3 -o myapp tmp.cu \` \
-   `-L /usr/local/cuda/lib64 -lcudart_static -ldl -lrt -pthread`
+3. ```$ mekongcc -mekong -mekong-model=model.yaml -O3 -o myapp tmp.cu \
+    -L /usr/local/cuda/lib64 -lcudart_static -ldl -lrt -pthread```
 
 For details about the long list of linker flags for the last step, consult
 [Compiling CUDA with clang](https://llvm.org/docs/CompileCudaWithLLVM.html).
