@@ -10,9 +10,17 @@ MERTINC="$DIR/../include/mekong"
 
 OPTS=()
 LDOPTS=()
+TRACE=
 
 while [[ $# -ge 1 ]]; do
   case $1 in
+    "-##")
+      TRACE=yes
+      ;;
+    "-###")
+      OPTS+=("$1")
+      TRACE=yes
+      ;;
     -mekong-model*)
       OPTS+=(-mllvm "$1")
       ;;
@@ -32,9 +40,11 @@ done
 
 CMD=("$CLANGXX" -Xclang -load -Xclang "$LIBMEKONG" --cuda-gpu-arch=sm_30)
 
-for word in "${CMD[@]}" "${OPTS[@]}" "${LDOPTS[@]}"; do
-  printf "\"$word\" "
-done
-printf "\n"
+if [[ -n "$TRACE" ]]; then
+  for word in "${CMD[@]}" "${OPTS[@]}" "${LDOPTS[@]}"; do
+    printf "\"$word\" "
+  done
+  printf "\n"
+fi
 
 "${CMD[@]}" "${OPTS[@]}" "${LDOPTS[@]}"
