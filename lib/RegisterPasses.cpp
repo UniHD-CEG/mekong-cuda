@@ -44,7 +44,7 @@ static void registerLateMekongPasses(const llvm::PassManagerBuilder &Builder,
 }
 
 static llvm::RegisterStandardPasses RegisterEarlyMekong(
-    llvm::PassManagerBuilder::EP_ModuleOptimizerEarly,
+    llvm::PassManagerBuilder::EP_LoopOptimizerEnd,
     registerEarlyMekongPasses);
 
 static llvm::RegisterStandardPasses RegisterLateMekong(
