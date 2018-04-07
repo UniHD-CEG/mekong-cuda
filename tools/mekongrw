@@ -1,5 +1,6 @@
 #!/bin/sh
 _=[[
+# vim: filetype=lua ts=2 sts=2 sw=2 et ai
 if command -v luajit >/dev/null 2>&1; then
   exec luajit "$0" "$@"
 fi
@@ -89,11 +90,7 @@ local function substitute_kernel_decl(str, fn)
 end
 
 local function substitute_include(str, fn)
-  local PATTERN = "(#include%s(%S+))";
-  str, num = string.gsub(str, PATTERN, function(whole, include)
-    return fn(whole, include)
-  end)
-  return str
+  return fn("", "") .. str
 end
 
 -- translate typename from llvm ir to C
@@ -370,32 +367,29 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, args)
   ]], env)
 end)
 
-local firstInclude = true
-contents = substitute_include(contents, function(orig, include)
-  if firstInclude then
-    firstInclude = false
-    local decls = {}
-    for name, kernel in pairs(kernels) do
-      local kernelDecl = string.format("extern \"C\" __global__ void %s(", _kernel_name(name))
-      for _, arg in ipairs(kernel['arguments']) do
-        kernelDecl = kernelDecl .. irttoc(arg['type-name']) .. ", "
-      end
-      kernelDecl = kernelDecl .. " __subgrid_kernel_t) {}"
-      decls[#decls+1] = kernelDecl
-      for idx, arg in ipairs(kernel['arguments']) do
-        if arg['is-pointer'] then
-          decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
-            _kernel_iterator(name, idx-1, "read"));
-          decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
-          _kernel_iterator(name, idx-1, "write"));
-        end
+contents = substitute_include(contents, function(_, _)
+  local decls = {}
+  for name, kernel in pairs(kernels) do
+    local kernelDecl = string.format("extern \"C\" __global__ void %s(", _kernel_name(name))
+    for _, arg in ipairs(kernel['arguments']) do
+      kernelDecl = kernelDecl .. irttoc(arg['type-name']) .. ", "
+    end
+    kernelDecl = kernelDecl .. " __subgrid_kernel_t) {}"
+    decls[#decls+1] = kernelDecl
+    for idx, arg in ipairs(kernel['arguments']) do
+      if arg['is-pointer'] then
+        decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
+        _kernel_iterator(name, idx-1, "read"));
+        decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
+        _kernel_iterator(name, idx-1, "write"));
       end
     end
-    local env = {
-      orig = orig,
-      decls = decls,
-    }
-    return string.template([[
+  end
+  local env = {
+    orig = orig,
+    decls = decls,
+  }
+  return string.template([[
 ///// start mekong header
 #include <stdint.h>
 #include "me-runtime.h"
@@ -408,10 +402,7 @@ end}}
 
 ///// end mekong header
 
-{{ orig }}]], env)
-  else
-    return orig
-  end
+]], env)
 end)
 
 print(contents)
