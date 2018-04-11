@@ -363,6 +363,20 @@ __isl_give isl_map* intersectRange(__isl_take isl_map* M, __isl_take isl_set* S)
   return M;
 }
 
+/** Check if the map range has a lower and upper bound.
+ */
+bool isMapRangeBounded(__isl_take isl_map* M) {
+  isl_set *R = isl_map_range(M);
+  bool bounded = true;
+  int numDims = isl_set_dim(R, isl_dim_out);
+  for (int i = 0; i < numDims; ++i) {
+    bounded &= isl_set_dim_has_lower_bound(R, isl_dim_out, i) == isl_bool_true;
+    bounded &= isl_set_dim_has_upper_bound(R, isl_dim_out, i) == isl_bool_true;
+  }
+  isl_set_free(R);
+  return bounded;
+}
+
 
 std::string typeToString(const Type* t) {
   std::string type_str;
@@ -478,7 +492,10 @@ struct MeKernelAnalysis : public FunctionPass {
           if (ArrayBounds != nullptr) {
             M = intersectRange(M, isl_set_copy(ArrayBounds));
           }
+
           kernelArg.readMap = isl_map_to_str(M);
+          kernelArg.isReadBounded = isMapRangeBounded(isl_map_copy(M));
+
           isl_map_free(M);
         }
 
@@ -498,7 +515,10 @@ struct MeKernelAnalysis : public FunctionPass {
           if (ArrayBounds != nullptr) {
             M = intersectRange(M, isl_set_copy(ArrayBounds));
           }
+
           kernelArg.writeMap = isl_map_to_str(M);
+          kernelArg.isWriteBounded = isMapRangeBounded(isl_map_copy(M));
+
           isl_map_free(M);
         }
         if (ArrayBounds) {

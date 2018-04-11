@@ -58,9 +58,11 @@ struct llvm::yaml::MappingTraits<Argument> {
 
     io.mapOptional("element-bitsize", info.elementBitsize);
     io.mapOptional("read-map", info.readMap);
-    io.mapOptional("write-map", info.writeMap);
     io.mapOptional("is-read-injective", info.isReadInjective);
+    io.mapOptional("is-read-bounded", info.isReadBounded);
+    io.mapOptional("write-map", info.writeMap);
     io.mapOptional("is-write-injective", info.isWriteInjective);
+    io.mapOptional("is-write-bounded", info.isWriteBounded);
     io.mapOptional("dim-sizes", info.dimsizes);
   }
 };

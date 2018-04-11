@@ -28,10 +28,15 @@ struct Argument {
   std::string typeName;
 
   int elementBitsize;
+
   std::string readMap;
-  std::string writeMap;
   bool isReadInjective;
+  bool isReadBounded;
+
+  std::string writeMap;
   bool isWriteInjective;
+  bool isWriteBounded;
+
   llvm::SmallVector<std::string, 4> dimsizes;
 };
 

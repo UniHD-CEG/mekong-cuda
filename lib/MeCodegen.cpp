@@ -607,6 +607,33 @@ struct MeCodegen : public ModulePass {
 
     SmallVector<Function*,8> generatedIterators;
 
+    /*
+    // check if application model allows partitioning
+    bool errors = false;
+    for (auto &kernel : app.kernels) {
+      for (auto &argument : kernel.arguments) {
+        if (argument.readMap != "" && !argument.isReadBounded) {
+          errs() << "!!! unbounded read: " << kernel.name << "." << argument.name << "\n";
+          errors = true;
+          continue;
+        }
+        if (argument.writeMap != "" && !argument.isWriteBounded) {
+          errs() << "!!! unbounded write: " << kernel.name << "." << argument.name << "\n";
+          errors = true;
+          continue;
+        }
+        if (argument.writeMap != "" && !argument.isWriteInjective) {
+          errs() << "!!! non-injective write: " << kernel.name << "." << argument.name << "\n";
+          errors = true;
+          continue;
+        }
+      }
+    }
+    if (errors) {
+      report_fatal_error("Application model does not allow partitioning");
+    }
+    */
+
     for (auto &kernel : app.kernels) {
       int argIdx = -1;
       for (auto &argument : kernel.arguments) {

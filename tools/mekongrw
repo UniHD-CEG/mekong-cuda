@@ -241,6 +241,24 @@ end
 
 contents = substitute_kernel_launch(contents, function(orig, name, grid, args)
   local kernel = kernels[name]
+
+  -- -- check read injectivity
+  -- invalidwrites = {}
+  --
+  -- for _, arg in pairs(kernel['arguments']) do
+  --   if arg['write-map'] ~= '' and not arg['is-write-injective'] then
+  --     invalidwrites[#invalidwrites+1] = string.format('kernel %s - argument %s', kernel['name'], arg['name'])
+  --   end
+  -- end
+  -- if #invalidwrites > 0 then
+  --   logf("non-injective writes:")
+  --   for _, msg in pairs(invalidwrites) do
+  --     logf("  %s", msg)
+  --   end
+  --   os.exit(1)
+  -- end
+
+  -- prepare template environment
   local env = {
     name = name,
     grid = grid,
