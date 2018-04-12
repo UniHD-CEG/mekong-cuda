@@ -33,6 +33,8 @@ static void registerEarlyMekongPasses(const llvm::PassManagerBuilder &Builder,
     PM.add(mekong::createMeCodegen(MekongModel));
     PM.add(mekong::createMeKernelSubgrid());
   }
+  if (MekongPreEnabled) {
+  }
 }
 
 // These passes should work on optimized (and canonicalized) IR
@@ -40,6 +42,8 @@ static void registerLateMekongPasses(const llvm::PassManagerBuilder &Builder,
     llvm::legacy::PassManagerBase &PM) {
   if (MekongPreEnabled) {
     PM.add(mekong::createMeKernelAnalysisWrapper(MekongModel));
+  }
+  if (MekongEnabled) {
   }
 }
 

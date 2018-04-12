@@ -155,7 +155,7 @@ struct MeKernelSubgrid : public ModulePass {
     }
 
     SmallVector<ReturnInst*,4> _;
-    CloneFunctionInto(F, OF, VM, false, _);
+    CloneFunctionInto(F, OF, VM, true, _);
 
     Argument *SpecArg = (F->arg_end()-1);
     SpecArg->addAttr(Attribute::ByVal);
