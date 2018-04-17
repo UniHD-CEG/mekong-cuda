@@ -38,7 +38,7 @@ while [[ $# -ge 1 ]]; do
   shift
 done
 
-CMD=("$CLANGXX" -Xclang -load -Xclang "$LIBMEKONG" --cuda-gpu-arch=sm_30)
+CMD=("$CLANGXX" -fplugin="$LIBMEKONG" --cuda-gpu-arch=sm_30)
 
 if [[ -n "$TRACE" ]]; then
   for word in "${CMD[@]}" "${OPTS[@]}" "${LDOPTS[@]}"; do
