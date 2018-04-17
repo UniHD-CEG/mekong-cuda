@@ -47,3 +47,27 @@ multiple GPUs, follow these steps:
 
 For details about the long list of linker flags for the last step, consult
 [Compiling CUDA with clang](https://llvm.org/docs/CompileCudaWithLLVM.html).
+
+## GNU Make Autorules
+
+An even simpler usage is to put the following auto rules into a Makefile:
+
+```
+MCC ?= ~/llvm-build/bin/mekongcc
+MRW ?= ~/llvm-build/bin/mekongrw
+NVCC ?= /usr/local/cuda/bin/nvcc
+
+%: %.tmp.cu %.yaml
+        $(MCC) -mekong -mekong-model=$(word 2,$^) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+
+%.yaml: %.cu
+        $(MCC) -mekong-pre -mekong-model=$@ $< -o /dev/null
+
+%.tmp.cu: %.cu %.yaml
+        $(MRW) -info=$(word 2,$^) $< > $@
+```
+
+
+Now you can simple call `$ make yourapp` to build the multi-gpu binary `yourapp`
+from the file `yourapp.cu`. YourThe paths to mekong and nvcc binaries might
+need adjustments, of course.
