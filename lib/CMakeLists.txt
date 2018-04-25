@@ -65,6 +65,8 @@ add_custom_command(OUTPUT "${LLVM_BINARY_DIR}/lib/libmekongrt.bc"
 add_custom_target(libmekongrt ALL DEPENDS
   "${LLVM_BINARY_DIR}/lib/libmekongrt.bc"
   )
+install(FILES ${LLVM_BINARY_DIR}/lib/libmekongrt.bc
+  DESTINATION lib)
 
 file(COPY Runtime/include/me-runtime.h
   DESTINATION ${LLVM_BINARY_DIR}/include/mekong)
