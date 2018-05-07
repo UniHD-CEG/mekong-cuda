@@ -44,6 +44,13 @@ using namespace llvm;
 
 namespace llvm {
 
+enum Partitioning {
+  PART_NONE = 0,
+  PART_LINEAR_X,
+  PART_LINEAR_Y,
+  PART_LINEAR_Z,
+};
+
 static std::string demangle(std::string name) {
     // demangle according to clang mangling rules
     int status = -1;
@@ -377,6 +384,48 @@ bool isMapRangeBounded(__isl_take isl_map* M) {
   return bounded;
 }
 
+/** Suggest partitioning for single write access.
+ * Input map must be canonical.
+ */
+Partitioning guessPartitioning(__isl_keep isl_map* M) {
+  int numDims = isl_map_dim(M, isl_dim_in);
+  for (int i = 0; i < numDims; ++i) {
+    const StringRef dimName(isl_map_get_dim_name(M, isl_dim_in, i));
+    if (dimName == "boff_z" || dimName == "bid_z" || dimName == "tid_z")
+      return PART_LINEAR_Z;
+    else if (dimName == "boff_y" || dimName == "bid_y" || dimName == "tid_y")
+      return PART_LINEAR_Y;
+    else if (dimName == "boff_x" || dimName == "bid_x" || dimName == "tid_x")
+      return PART_LINEAR_X;
+  }
+  return PART_LINEAR_X;
+}
+
+/** Combine partitioning suggestions of multiple arrays into single suggestion
+ * for entire kernel.
+ * Strategy: choose highest suggested dimension, default to x.
+ */
+Partitioning combinePartitioningSuggestions(const ArrayRef<Partitioning> suggestions) {
+  Partitioning suggestion = PART_LINEAR_X;
+  for (const auto part : suggestions) {
+    if (part > suggestion) {
+      suggestion = part;
+    }
+  }
+  return suggestion;
+}
+
+std::string partitioningToString(Partitioning part) {
+  switch (part) {
+    case PART_LINEAR_X:
+      return "linear:x";
+    case PART_LINEAR_Y:
+      return "linear:y";
+    case PART_LINEAR_Z:
+      return "linear:z";
+  }
+  return "unknown";
+}
 
 std::string typeToString(const Type* t) {
   std::string type_str;
@@ -409,12 +458,7 @@ struct MeKernelAnalysis : public FunctionPass {
       kernel->mangled_name = (F.getName()).str();
       kernel->partitioned_name = "__" + kernel->name + "_subgrid";
 
-      StringRef PartitioningSuggestion = getPrefixedGlobalAnnotation(&F, {"me-partitioning"}).trim();
-      if (PartitioningSuggestion != "") {
-	kernel->partitioning = PartitioningSuggestion;
-      } else {
-	kernel->partitioning = "linear:x";
-      }
+      SmallVector<Partitioning,4> suggestions;
 
       // arguments that are parameters to isl maps
       SmallSet<const Value*,4> Parameters;
@@ -519,6 +563,8 @@ struct MeKernelAnalysis : public FunctionPass {
           kernelArg.writeMap = isl_map_to_str(M);
           kernelArg.isWriteBounded = isMapRangeBounded(isl_map_copy(M));
 
+          suggestions.push_back(guessPartitioning(M));
+
           isl_map_free(M);
         }
         if (ArrayBounds) {
@@ -530,6 +576,16 @@ struct MeKernelAnalysis : public FunctionPass {
           kernelArg.dimsizes.push_back(pexp->getPWA().str());
         }
       }
+
+
+      StringRef PartitioningSuggestion = getPrefixedGlobalAnnotation(&F, {"me-partitioning"}).trim();
+      if (PartitioningSuggestion != "") {
+        kernel->partitioning = PartitioningSuggestion;
+      } else {
+        Partitioning suggestion = combinePartitioningSuggestions(suggestions);
+        kernel->partitioning = partitioningToString(suggestion);
+      }
+
       // check if argument is a parameter to an isl map
       for (auto &arg : F.args()) {
         mekong::Argument& kernelArg = kernel->arguments[arg.getArgNo()];
