@@ -1,0 +1,442 @@
+#!/bin/sh
+_=[[
+# vim: filetype=lua ts=2 sts=2 sw=2 et ai
+if command -v luajit >/dev/null 2>&1; then
+  exec luajit "$0" "$@"
+fi
+if command -v lua >/dev/null 2>&1; then
+  exec lua "$0" "$@"
+fi
+echo 'requires lua or luajit in $PATH'
+exit 1
+]]
+
+--------------------------------------------------------------------------------
+-- The mekong driver driver. It provides gcc/nvcc "compatible" interface to
+-- compile applications and apply mekong partitioning.
+-- The design is inspired by the clang driver and divided into the
+-- follwing steps:
+-- 1. parse arguments
+-- 2. construct actions to get to desired output using all inputs
+-- 3. bind actions to filenames
+-- 4. translate arguments to bindings (i.e. assemble commands)
+-- 5. execute commands
+--------------------------------------------------------------------------------
+
+local app = (arg[0]):match(".-([^%/]+)$")
+local script_dir = (arg[0]):match("(.-)[^%/]+$")
+local script_dir = script_dir:match("(.-)/?$")
+package.path = script_dir .. "/../lib/lua/?.lua"
+local argparse = require('argparse')
+local pprint = require('pprint')
+
+CLANGXX = script_dir .. "/clang++"
+MEKONGRW = script_dir .. "/mekongrw"
+LIBMEKONG = script_dir .. "/../lib/LLVMMekong@CMAKE_SHARED_LIBRARY_SUFFIX@"
+MERTLIB = script_dir .. "/../lib/libmekongrt.bc"
+MERTINC = script_dir .. "/../include/mekong"
+
+CUDAARCH = "sm_30"
+CUDAPATH = nil
+
+--------------------------------------------------------------------------------
+-- globals
+
+local steps = {
+  preprocess = true,
+  analyze = true,
+  rewrite = true,
+  compile = true,
+  link = true,
+}
+local supported = {
+  ["cuda"] = 1,
+  ["yaml"] = 1,
+  ["cuda2"] = 1,
+  ["obj"] = 1,
+}
+
+local args = nil
+local os_name = nil
+local actions = {}
+local bindings = {}
+local cmds = {}
+local errcode = 0
+
+local temps = {}
+
+--------------------------------------------------------------------------------
+-- steps
+
+function parse()
+  local parser = argparse("mekc", "The mekong compiler.")
+  parser:argument("input", "An input file."):args("+")
+  local E = parser:flag("-E", "Only run preprocess step."):default(false)
+  local A = parser:flag("-A", "Only run preprocess and analysis steps."):default(false)
+  local R = parser:flag("-R", "Only run preprocess, analysis, and rewrite steps."):default(false)
+  local c = parser:flag("-c", "Only run preprocess, analysis, rewrite, compile and assemble steps."):default(false)
+  parser:mutex(E, A, R, c)
+
+  parser:option("-I", "Search directory for headers."):count("*")
+  parser:option("-L", "Search directory for libraries."):count("*")
+  parser:option("-l", "Link library."):count("*")
+  parser:option("-O", "Optimization level."):default(2)
+  parser:option("-D", "Define macro."):count("*")
+  parser:option("--cuda-gpu-arch", "GPU target architecture."):count("?"):default(CUDAARCH)
+  parser:option("--cuda-path", "CUDA SDK path."):count("?"):default(CUDAPATH)
+
+  parser:flag("--ccc-print-enabled", "Print enabled phases."):default(false)
+  parser:flag("--ccc-print-phases", "Print compilation actions."):default(false)
+  parser:flag("--ccc-print-bindings", "Print compilation bindings."):default(false)
+  parser:flag("--###", "Print (but do not execute) commands to run."):default(false)
+  parser:flag("-v", "Print commands to run."):default(false)
+
+  parser:option("-o", "Output file."):count("?")
+
+  args = parser:parse()
+
+  os_name = io.popen('uname -s','r'):read('*l')
+
+  if args["E"] then
+    printf("-E currently not supported")
+    os.exit(1)
+  end
+
+  steps["analyze"]  = not args["E"]
+  steps["rewrite"]  = not args["E"] and not args["A"]
+  steps["compile"]  = not args["E"] and not args["A"] and not args["R"]
+  steps["link"]     = not args["E"] and not args["A"] and not args["R"] and not args["c"]
+
+  if args["ccc_print_enabled"] then
+    print("1: preprocess")
+    local i = 2
+    for _, phase in ipairs{"analyze", "rewrite", "compile", "link"} do
+      if steps[phase] then printf("%d: %s", i, phase) end
+      i = i + 1
+    end
+  end
+
+end
+
+function pipeline()
+  -- yaml files can be passed on the command line.
+  -- Such an explicitly passed yaml file then disables analysis for the next
+  -- cuda file and results in using the specified yaml file instead
+  local yamls = {} -- yaml stack, enables behaviour above
+
+  local objs = {}
+
+  for _, input in pairs(args.input) do
+    repeat -- lua hack for continue (breaks now act as a continue)
+      local ftype = guess_type(input)
+
+      if supported[ftype] == nil then
+        printf("don't know what to do with file '%s'", input)
+        os.exit(1)
+      end
+
+      actions[#actions+1] = {"input", {input}, ftype}
+      local result = #actions
+
+      if ftype == "yaml" then
+        yamls[#yamls+1] = result
+        break
+      end
+
+      if ftype == "cuda" and steps["analyze"] and #yamls == 0 then
+        local yaml, _ = add_action("analyze", {result})
+        yamls[#yamls+1] = yaml
+      end
+
+      local popyaml = false
+      if ftype == "cuda" and steps["rewrite"] then
+        assert(#yamls > 0)
+        result, ftype = add_action("rewrite", {result, yamls[#yamls]})
+        popyaml = true
+      end
+
+      if ftype == "cuda2" and steps["compile"] then
+        assert(#yamls > 0)
+        result, ftype = add_action("compile", {result, yamls[#yamls]})
+        popyaml = true
+      end
+
+      -- yaml stack only popped here, because it's need for both rewriting and compile
+      if popyaml then
+        yamls[#yamls] = nil
+      end
+
+      if ftype == "obj" and steps["link"] then
+        objs[#objs+1] = result
+      end
+    until true
+  end
+  if #yamls > 0 and not args["A"] then
+    print("warning: there were unused yaml files")
+  end
+
+  if #objs > 0 then
+    add_action("link", objs)
+  end
+
+  if args["ccc_print_phases"] then
+    for num, action in ipairs(actions) do
+      printf("%d: %s, [%s], %s", num, action[1], table.concat(action[2], ", "), action[3] or "wat")
+    end
+  end
+end
+
+function bind()
+
+  action_outs = {}
+
+  local base = ""
+  for idx, action in ipairs(actions) do
+    local inputs = {}
+    local out = nil
+    if idx == #actions and args["o"] ~= nil then
+      out = args["o"]
+    else
+      if action[1] == "input" then
+        out = action[2][1]
+        base = basename(out)
+      elseif action[1] == "analyze" then
+        out = make_temp(base .. "?.yaml")
+      elseif action[1] == "rewrite" then
+        out = make_temp(base .. "?.cua")
+      elseif action[1] == "compile" then
+        out = make_temp(base .. "?.o")
+      elseif action[1] == "link" then
+        out = "a.out"
+      end
+    end
+    if action[1] ~= "input" and idx ~= #actions then
+      temps[#temps+1] = out
+    end
+    action_outs[idx] = out
+    for _, input in ipairs(action[2]) do
+      inputs[#inputs+1] = action_outs[input]
+    end
+    bindings[idx] = {action[1], inputs, out}
+  end
+
+  if args["ccc_print_bindings"] then
+    for idx, binding in ipairs(bindings) do
+      printf("%d: %s : [%s] -> %s", idx, binding[1], table.concat(binding[2], ", "), binding[3])
+    end
+  end
+end
+
+function translate()
+  for idx, binding in ipairs(bindings) do
+    local cmd = nil
+    if binding[1] == "input" then
+      -- do nothing
+    elseif binding[1] == "analyze" then
+      cmd = { CLANGXX }
+      cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
+      cmd = append(cmd, "-O1", "--cuda-device-only", "-c", "-mllvm", "-mekong-pre")
+      cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[3])
+      cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
+      if args["cuda_path"] ~= nil then
+        cmd = append(cmd, "--cuda-path=" .. args["cuda_path"])
+      end
+      for _, include in ipairs(args["I"]) do
+        cmd = append(cmd, "-I" .. include)
+      end
+      for _, define in ipairs(args["D"]) do
+        cmd = append(cmd, "-D" .. define)
+      end
+      cmd = append(cmd, binding[2][1])
+      cmd = append(cmd, "-o", "/dev/null")
+
+    elseif binding[1] == "rewrite" then
+      cmd = { MEKONGRW }
+      cmd = append(cmd, "--info=" .. binding[2][2])
+      cmd = append(cmd, binding[2][1])
+      cmd = append(cmd, "-o", binding[3])
+
+    elseif binding[1] == "compile" then
+      cmd = { CLANGXX }
+      cmd = append(cmd, "-x", "cuda")
+      cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
+      cmd = append(cmd, "-O"..args["O"], "-c", "-mllvm", "-mekong")
+      cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[2][2])
+      cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
+      if args["cuda_path"] ~= nil then
+        cmd = append(cmd, "--cuda-path=" .. args["cuda_path"])
+      end
+      for _, include in ipairs(args["I"]) do
+        cmd = append(cmd, "-I" .. include)
+      end
+      cmd = append(cmd, "-I" .. MERTINC)
+      for _, define in ipairs(args["D"]) do
+        cmd = append(cmd, "-D" .. define)
+      end
+      cmd = append(cmd, binding[2][1])
+      cmd = append(cmd, "-o", binding[3])
+
+    elseif binding[1] == "link" then
+      cmd = { CLANGXX }
+      cmd = append(cmd, "-O"..args["O"])
+      for _, libdir in ipairs(args["L"]) do
+        cmd = append(cmd, "-L" .. libdir)
+      end
+      for _, library in ipairs(args["l"]) do
+        cmd = append(cmd, "-l" .. library)
+      end
+      for _, define in ipairs(args["D"]) do
+        cmd = append(cmd, "-D" .. define)
+      end
+      for _, input in ipairs(binding[2]) do
+        cmd = append(cmd, input)
+      end
+      cmd = append(cmd, MERTLIB)
+      cmd = append(cmd, "-lcudart_static", "-ldl", "-pthread")
+      if os_name == "Linux" then
+        cmd = append(cmd, "-lrt")
+      end
+      cmd = append(cmd, "-o", binding[3])
+
+    end
+    if cmd ~= nil then
+      cmds[#cmds+1] = cmd
+    end
+  end
+
+  if args["###"] then
+    for _, cmd in ipairs(cmds) do
+      printf("# %s", table.concat(cmd, " "))
+    end
+  end
+end
+
+function execute()
+  if args["###"] then
+    return
+  end
+  for _, cmd in ipairs(cmds) do
+    cmd_str = table.concat(cmd, " ")
+    if args["v"] then
+      print(cmd_str)
+    end
+    if os.execute(cmd_str) ~= 0 then
+      print("error encountered, compilation aborted")
+      errcode = 1
+      break
+    end
+  end
+end
+
+function cleanup()
+  for _, temp in pairs(temps) do
+    if args["###"] then
+      print("removing temporary " .. temp)
+    else
+      os.remove(temp)
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+-- utility functions
+
+function printf(fmt, ...)
+  print(string.format(fmt, ...))
+end
+
+function escape(str)
+  str = str:gsub('"', '\"')
+  if str:find("[ \t]") then
+    str = '"' .. str .. '"'
+  end
+  return str
+end
+
+function append(table, ...)
+  local new = {}
+  for _, el in ipairs(table) do
+    new[#new+1] = el
+  end
+  for _, el in ipairs{...} do
+    new[#new+1] = escape(el)
+  end
+  return new
+end
+
+function has_suffix(str, ...)
+  for _, suffix in ipairs({...}) do
+    if str:lower():find(suffix .. "$") ~= nil then return true end
+  end
+  return false
+end
+
+function add_action(phase, input)
+  local restype = phase_result(phase)
+  actions[#actions+1] = {phase, input, restype}
+  return #actions, restype
+end
+
+function phase_result(phase)
+  if phase == "preprocess" then return "cuda" end
+  if phase == "analyze" then return "yaml" end
+  if phase == "rewrite" then return "cuda2" end
+  if phase == "compile" then return "obj" end
+  if phase == "link" then return "binary" end
+  assert(false, string.format("invalid phase '%s'", phase))
+end
+
+-- guess type of input file
+function guess_type(file)
+  local steps = {true, true, true, true, true}
+  if has_suffix(file, ".cu") then return "cuda" end
+  if has_suffix(file, ".cua") then return "cuda2" end -- rewritten
+  if has_suffix(file, ".yaml") then return "yaml" end
+  if has_suffix(file, ".ll", ".bc", ".o") then return "obj" end
+  return "unknown"
+end
+
+function basename(path)
+  return path:gsub("(.*/)(.*)", "%2"):gsub("(.*)(%..*)", "%1")
+end
+
+function exists(path)
+  local f=io.open(path, "r")
+  if f~=nil then
+    io.close(f)
+    return true
+  else
+    return false
+  end
+end
+
+local charset = {}  do -- [0-9a-zA-Z]
+    for c = 48, 57  do table.insert(charset, string.char(c)) end
+    for c = 65, 90  do table.insert(charset, string.char(c)) end
+    for c = 97, 122 do table.insert(charset, string.char(c)) end
+end
+
+math.randomseed(os.clock()^5)
+local function randomString(length)
+    if not length or length <= 0 then return '' end
+    return randomString(length - 1) .. charset[math.random(1, #charset)]
+end
+
+function make_temp(pattern)
+  local attempt = pattern:gsub("?", "")
+  while exists(attempt) do
+    attempt = pattern:gsub("?", "-" .. randomString(3))
+  end
+  return attempt
+end
+
+--------------------------------------------------------------------------------
+-- "main" function
+
+parse()
+pipeline()
+bind()
+translate()
+execute()
+cleanup()
+os.exit(errcode)

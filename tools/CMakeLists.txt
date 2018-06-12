@@ -7,13 +7,13 @@ install(FILES ${LLVM_BINARY_DIR}/bin/mekongcc
 
 file(COPY mekongrw
   DESTINATION ${LLVM_BINARY_DIR}/bin)
-file(COPY lib/lua/pprint.lua lib/lua/yaml.lua
-  DESTINATION ${LLVM_BINARY_DIR}/lib/lua)
-
 install(FILES ${LLVM_BINARY_DIR}/bin/mekongrw
   DESTINATION bin
   PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ
      GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ)
-install(FILES ${LLVM_BINARY_DIR}/lib/lua/yaml.lua
-     ${LLVM_BINARY_DIR}/lib/lua/pprint.lua
-  DESTINATION lib/lua)
+
+configure_file(mekc ${LLVM_BINARY_DIR}/bin/mekc @ONLY)
+install(FILES ${LLVM_BINARY_DIR}/bin/mekc
+  DESTINATION bin
+  PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ
+     GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ)

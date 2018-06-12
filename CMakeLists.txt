@@ -27,6 +27,9 @@ else ()
   set(LLVM_SOURCE_ROOT "${LLVM_MAIN_SRC_DIR}")
 endif ()
 
+##################################################################################
+## package build
+
 set(MEKONG_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(MEKONG_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
@@ -56,3 +59,19 @@ include_directories(
 add_definitions( -D_GNU_SOURCE )
 add_subdirectory(lib)
 add_subdirectory(tools)
+
+
+##################################################################################
+## package cmake config
+
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+    "cmake/config.cmake.in"
+    "${LLVM_BINARY_DIR}/lib/cmake/mekong-config.cmake"
+    INSTALL_DESTINATION "lib/cmake"
+)
+install(
+    FILES "${LLVM_BINARY_DIR}/lib/cmake/mekong-config.cmake"
+    DESTINATION "lib/cmake"
+)

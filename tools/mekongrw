@@ -14,6 +14,7 @@ exit 1
 local app = (arg[0]):match(".-([^%/]+)$")
 local script_dir = (arg[0]):match("(.-)[^%/]+$")
 package.path = script_dir .. "/../lib/lua/?.lua"
+local argparse = require('argparse')
 local yaml = require('yaml')
 local pprint = require('pprint')
 
@@ -172,25 +173,18 @@ end
 
 local inputfiles = {}
 local kernelinfos = {}
+local output = nil
 
-local idx = 1
-while idx <= #arg do
-  local curr = arg[idx]
-  idx = idx + 1
-  if string.match(curr, "-info=(.*)") then
-    kernelinfos[#kernelinfos+1] = string.match(curr, "-info=(.*)")
-  else
-    inputfiles[#inputfiles+1] = curr
-  end
-end
+local parser = argparse("mekongrw", "The mekong rewriter.")
+parser:argument("input", "An input file."):args("+")
+parser:option("--info", "Yaml analysis results."):count("*")
+parser:option("-o", "Output file."):default("-")
+local args = parser:parse()
 
-local usage = "usage: " .. app .." <cuda file>"
+inputfiles = args["input"]
+kernelinfos = args["info"]
 
-if #inputfiles < 1 then
-  logf("error: no cuda input files")
-  logf(usage)
-  os.exit(1)
-end
+output = args["o"]
 
 if #kernelinfos < 1 then
   logf("warning: no kernel info files")
@@ -423,4 +417,16 @@ end}}
 ]], env)
 end)
 
-print(contents)
+if output == '-' then
+  print(contents)
+else
+  local f, err = io.open(output, "w")
+  if f~=nil then
+    f:write(contents)
+    f:write("\n")
+    io.close(f)
+  else
+    logf("unable to open output file: %s", err)
+    os.exit(1)
+  end
+end

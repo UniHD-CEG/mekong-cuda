@@ -72,3 +72,9 @@ file(COPY Runtime/include/me-runtime.h
   DESTINATION ${LLVM_BINARY_DIR}/include/mekong)
 install(FILES ${LLVM_BINARY_DIR}/include/mekong/me-runtime.h
   DESTINATION include/mekong)
+
+file(COPY lua/pprint.lua lua/yaml.lua lua/argparse.lua
+  DESTINATION ${LLVM_BINARY_DIR}/lib/lua)
+install(FILES ${LLVM_BINARY_DIR}/lib/lua/yaml.lua
+     ${LLVM_BINARY_DIR}/lib/lua/pprint.lua
+  DESTINATION lib/lua)
