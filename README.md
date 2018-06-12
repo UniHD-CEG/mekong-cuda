@@ -32,42 +32,21 @@ Now you should be able to compile and install llvm as usual.
 
 # Usage
 
-Mekong adds two new commands in the `bin` directory: `mekongcc` and `mekongrw`.
-`mekongcc` is a thin clang++ wrapper that loads the Mekong LLVM Module and
-transforms some of the arguments it is given.
-`mekongrw` is a lua based rewriter for CUDA code.
+Mekong adds a new tool to the bin directory, the compiler driver "mekc".
+It supports a subset of the gpucc arguments and orchestrates the pipeline.
+CUDA linking directives are automatically added, except for the linker
+search path.
 
-In order to compile an application `myapp.cu` into a binary 'myapp' for
-multiple GPUs, follow these steps:
+So in order to compiler an application `myapp.cu` to the binary `myapp`,
+use the following command:
 
-1. `$ mekongcc -mekong-pre -mekong-model=model.yaml -o /dev/null myapp.cu`
-2. `$ mekongrw -info=model.yaml myapp.cu > tmp.cu`
-3. ```$ mekongcc -mekong -mekong-model=model.yaml -O3 -o myapp tmp.cu \
-    -L /usr/local/cuda/lib64 -lcudart_static -ldl -lrt -pthread```
+`$ mekc myapp.cu -o myapp -L /usr/local/cuda/lib64`
 
-For details about the long list of linker flags for the last step, consult
+For details about gpucc CUDA compilation, consult
 [Compiling CUDA with clang](https://llvm.org/docs/CompileCudaWithLLVM.html).
 
-## GNU Make Autorules
-
-An even simpler usage is to put the following auto rules into a Makefile:
-
-```
-MCC ?= ~/llvm-build/bin/mekongcc
-MRW ?= ~/llvm-build/bin/mekongrw
-NVCC ?= /usr/local/cuda/bin/nvcc
-
-%: %.tmp.cu %.yaml
-        $(MCC) -mekong -mekong-model=$(word 2,$^) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
-
-%.yaml: %.cu
-        $(MCC) -mekong-pre -mekong-model=$@ $< -o /dev/null
-
-%.tmp.cu: %.cu %.yaml
-        $(MRW) -info=$(word 2,$^) $< > $@
-```
-
-
-Now you can simple call `$ make yourapp` to build the multi-gpu binary `yourapp`
-from the file `yourapp.cu`. YourThe paths to mekong and nvcc binaries might
-need adjustments, of course.
+Internally, two new compilation steps are added after preprocessing but
+before compiling: "polyhedral analysis" and "rewriting".
+Analog to the `-c` switch, there is a new switch `-A` that terminates
+compilation after analysis and a switch `-R` that terminates compilation
+after rewriting the source code.
