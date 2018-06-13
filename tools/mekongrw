@@ -214,8 +214,10 @@ local kernels = {}
 for _, filename in ipairs(kernelinfos) do
   local fcontents = io.open(filename):read('*a')
   local info = yaml.eval(fcontents)
-  for idx, k in ipairs(info.kernels) do
-    kernels[k['name']] = k
+  if info.kernels ~= "..." then
+    for idx, k in ipairs(info.kernels) do
+      kernels[k['name']] = k
+    end
   end
 end
 
