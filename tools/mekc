@@ -78,22 +78,32 @@ function parse()
   parser:mutex(E, A, R, c)
 
   parser:option("-I", "Search directory for headers."):count("*")
-  parser:option("-L", "Search directory for libraries."):count("*")
-  parser:option("-l", "Link library."):count("*")
   parser:option("-O", "Optimization level."):default(2)
   parser:option("-D", "Define macro."):count("*")
   parser:option("--cuda-gpu-arch", "GPU target architecture."):count("?"):default(CUDAARCH)
   parser:option("--cuda-path", "CUDA SDK path."):count("?"):default(CUDAPATH)
+  parser:option("-std", "c++ standard du use") -- dummy
+
+  parser:option("-L", "Search directory for libraries."):count("*")
+  parser:option("-l", "Link library."):count("*")
 
   parser:flag("--ccc-print-enabled", "Print enabled phases."):default(false)
   parser:flag("--ccc-print-phases", "Print compilation actions."):default(false)
   parser:flag("--ccc-print-bindings", "Print compilation bindings."):default(false)
-  parser:flag("--###", "Print (but do not execute) commands to run."):default(false)
+  parser:flag("-###", "Print (but do not execute) commands to run.") -- dymmy
   parser:flag("-v", "Print commands to run."):default(false)
 
   parser:option("-o", "Output file."):count("?")
 
-  args = parser:parse()
+  local cmd_args = rawget(_G, "arg") or {}
+  weird_args = {}
+  weird_args["std"], cmd_args = parse_pattern("^-std=.*$", cmd_args)
+  weird_args["###"], cmd_args = parse_pattern("^-###$", cmd_args)
+
+  args = parser:parse(cmd_args)
+  for k, v in pairs(weird_args) do
+    args[k] = v
+  end
 
   os_name = io.popen('uname -s','r'):read('*l')
 
@@ -236,6 +246,7 @@ function translate()
       cmd = { CLANGXX }
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
       cmd = append(cmd, "-O1", "--cuda-device-only", "-c", "-mllvm", "-mekong-pre")
+      cmd = append(cmd, args["std"])
       cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[3])
       cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
       if args["cuda_path"] ~= nil then
@@ -261,6 +272,7 @@ function translate()
       cmd = append(cmd, "-x", "cuda")
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
       cmd = append(cmd, "-O"..args["O"], "-c", "-mllvm", "-mekong")
+      cmd = append(cmd, args["std"])
       cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[2][2])
       cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
       if args["cuda_path"] ~= nil then
@@ -284,9 +296,6 @@ function translate()
       end
       for _, library in ipairs(args["l"]) do
         cmd = append(cmd, "-l" .. library)
-      end
-      for _, define in ipairs(args["D"]) do
-        cmd = append(cmd, "-D" .. define)
       end
       for _, input in ipairs(binding[2]) do
         cmd = append(cmd, input)
@@ -340,6 +349,27 @@ end
 
 --------------------------------------------------------------------------------
 -- utility functions
+
+-- matches the pattern against all args, keeping last match.
+-- argument that did not match are copied and returned as the new args
+-- returns: last match, modified args
+function parse_pattern(pattern, args)
+  local i = 1
+  local result = nil
+  local newargs = {}
+  for _, arg in ipairs(args) do
+    if arg == "--" then
+      break
+    end
+    local m = arg:match(pattern)
+    if m then
+      result = m
+    else
+      newargs[#newargs+1] = arg
+    end
+  end
+  return result, newargs
+end
 
 function printf(fmt, ...)
   print(string.format(fmt, ...))
