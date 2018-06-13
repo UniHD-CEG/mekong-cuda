@@ -31,6 +31,7 @@ local argparse = require('argparse')
 local pprint = require('pprint')
 
 CLANGXX = script_dir .. "/clang++"
+CLANG = script_dir .. "/clang"
 MEKONGRW = script_dir .. "/mekongrw"
 LIBMEKONG = script_dir .. "/../lib/LLVMMekong@CMAKE_SHARED_LIBRARY_SUFFIX@"
 MERTLIB = script_dir .. "/../lib/libmekongrt.bc"
@@ -53,6 +54,8 @@ local supported = {
   ["cuda"] = 1,
   ["yaml"] = 1,
   ["cuda2"] = 1,
+  ["c"] = 1,
+  ["c++"] = 1,
   ["obj"] = 1,
 }
 
@@ -178,6 +181,14 @@ function pipeline()
         yamls[#yamls] = nil
       end
 
+      if ftype == "c++" and steps["compile"] then
+        result, ftype = add_action("compile-c++", {result})
+      end
+
+      if ftype == "c" and steps["compile"] then
+        result, ftype = add_action("compile-c", {result})
+      end
+
       if ftype == "obj" and steps["link"] then
         objs[#objs+1] = result
       end
@@ -215,6 +226,10 @@ function bind()
       elseif action[1] == "rewrite" then
         out = make_temp(base .. "?.cua")
       elseif action[1] == "compile" then
+        out = make_temp(base .. "?.o")
+      elseif action[1] == "compile-c" then
+        out = make_temp(base .. "?.o")
+      elseif action[1] == "compile-c++" then
         out = make_temp(base .. "?.o")
       elseif action[1] == "link" then
         out = "a.out"
@@ -280,6 +295,38 @@ function translate()
       if args["cuda_path"] ~= nil then
         cmd = append(cmd, "--cuda-path=" .. args["cuda_path"])
       end
+      for _, include in ipairs(args["I"]) do
+        cmd = append(cmd, "-I" .. include)
+      end
+      cmd = append(cmd, "-I" .. MERTINC)
+      for _, define in ipairs(args["D"]) do
+        cmd = append(cmd, "-D" .. define)
+      end
+      cmd = append(cmd, binding[2][1])
+      cmd = append(cmd, "-o", binding[3])
+
+    elseif binding[1] == "compile-c" then
+      cmd = { CLANG }
+      cmd = append(cmd, "-x", "c")
+      cmd = append(cmd, "-O"..args["O"], "-c")
+      cmd = append(cmd, args["g"])
+      cmd = append(cmd, args["std"])
+      for _, include in ipairs(args["I"]) do
+        cmd = append(cmd, "-I" .. include)
+      end
+      cmd = append(cmd, "-I" .. MERTINC)
+      for _, define in ipairs(args["D"]) do
+        cmd = append(cmd, "-D" .. define)
+      end
+      cmd = append(cmd, binding[2][1])
+      cmd = append(cmd, "-o", binding[3])
+
+    elseif binding[1] == "compile-c++" then
+      cmd = { CLANGXX }
+      cmd = append(cmd, "-x", "c++")
+      cmd = append(cmd, "-O"..args["O"], "-c")
+      cmd = append(cmd, args["g"])
+      cmd = append(cmd, args["std"])
       for _, include in ipairs(args["I"]) do
         cmd = append(cmd, "-I" .. include)
       end
@@ -408,6 +455,8 @@ function phase_result(phase)
   if phase == "analyze" then return "yaml" end
   if phase == "rewrite" then return "cuda2" end
   if phase == "compile" then return "obj" end
+  if phase == "compile-c" then return "obj" end
+  if phase == "compile-c++" then return "obj" end
   if phase == "link" then return "binary" end
   assert(false, string.format("invalid phase '%s'", phase))
 end
@@ -426,6 +475,8 @@ function guess_type(file)
   if has_suffix(file, ".cu") then return "cuda" end
   if has_suffix(file, ".cua") then return "cuda2" end -- rewritten
   if has_suffix(file, ".yaml") then return "yaml" end
+  if has_suffix(file, ".c") then return "c" end
+  if has_suffix(file, ".cpp", ".cc", ".cxx") then return "c++" end
   if has_suffix(file, ".ll", ".bc", ".o") then return "obj" end
   return "unknown"
 end
