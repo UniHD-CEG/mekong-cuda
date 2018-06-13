@@ -50,14 +50,6 @@ local steps = {
   compile = true,
   link = true,
 }
-local supported = {
-  ["cuda"] = 1,
-  ["yaml"] = 1,
-  ["cuda2"] = 1,
-  ["c"] = 1,
-  ["c++"] = 1,
-  ["obj"] = 1,
-}
 
 local args = nil
 local os_name = nil
@@ -145,7 +137,7 @@ function pipeline()
     repeat -- lua hack for continue (breaks now act as a continue)
       local ftype = guess_type(input)
 
-      if supported[ftype] == nil then
+      if ftype == "unknown" then
         printf("don't know what to do with file '%s'", input)
         os.exit(1)
       end
@@ -309,7 +301,7 @@ function translate()
       cmd = { CLANG }
       cmd = append(cmd, "-x", "c")
       cmd = append(cmd, "-O"..args["O"], "-c")
-      cmd = append(cmd, args["g"])
+      cmd = append(cmd, args["g"] and "-g")
       cmd = append(cmd, args["std"])
       for _, include in ipairs(args["I"]) do
         cmd = append(cmd, "-I" .. include)
@@ -325,7 +317,7 @@ function translate()
       cmd = { CLANGXX }
       cmd = append(cmd, "-x", "c++")
       cmd = append(cmd, "-O"..args["O"], "-c")
-      cmd = append(cmd, args["g"])
+      cmd = append(cmd, args["g"] and "-g")
       cmd = append(cmd, args["std"])
       for _, include in ipairs(args["I"]) do
         cmd = append(cmd, "-I" .. include)
@@ -340,7 +332,7 @@ function translate()
     elseif binding[1] == "link" then
       cmd = { CLANGXX }
       cmd = append(cmd, "-O"..args["O"])
-      cmd = append(cmd, args["g"])
+      cmd = append(cmd, args["g"] and "-g")
       for _, libdir in ipairs(args["L"]) do
         cmd = append(cmd, "-L" .. libdir)
       end
@@ -439,7 +431,9 @@ function append(table, ...)
     new[#new+1] = el
   end
   for _, el in ipairs{...} do
-    new[#new+1] = escape(el)
+    if el then
+      new[#new+1] = escape(el)
+    end
   end
   return new
 end
