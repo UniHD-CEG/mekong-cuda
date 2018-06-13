@@ -77,6 +77,8 @@ function parse()
   local c = parser:flag("-c", "Only run preprocess, analysis, rewrite, compile and assemble steps."):default(false)
   parser:mutex(E, A, R, c)
 
+  parser:flag("-g", "debug info."):default(nil)
+
   parser:option("-I", "Search directory for headers."):count("*")
   parser:option("-O", "Optimization level."):default(2)
   parser:option("-D", "Define macro."):count("*")
@@ -197,9 +199,7 @@ function pipeline()
 end
 
 function bind()
-
   action_outs = {}
-
   local base = ""
   for idx, action in ipairs(actions) do
     local inputs = {}
@@ -221,7 +221,7 @@ function bind()
       end
     end
     if action[1] ~= "input" and idx ~= #actions then
-      temps[#temps+1] = out
+      temps[out] = true
     end
     action_outs[idx] = out
     for _, input in ipairs(action[2]) do
@@ -246,6 +246,7 @@ function translate()
       cmd = { CLANGXX }
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
       cmd = append(cmd, "-O1", "--cuda-device-only", "-c", "-mllvm", "-mekong-pre")
+      cmd = append(cmd, args["g"])
       cmd = append(cmd, args["std"])
       cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[3])
       cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
@@ -272,6 +273,7 @@ function translate()
       cmd = append(cmd, "-x", "cuda")
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
       cmd = append(cmd, "-O"..args["O"], "-c", "-mllvm", "-mekong")
+      cmd = append(cmd, args["g"])
       cmd = append(cmd, args["std"])
       cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[2][2])
       cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
@@ -291,6 +293,7 @@ function translate()
     elseif binding[1] == "link" then
       cmd = { CLANGXX }
       cmd = append(cmd, "-O"..args["O"])
+      cmd = append(cmd, args["g"])
       for _, libdir in ipairs(args["L"]) do
         cmd = append(cmd, "-L" .. libdir)
       end
@@ -338,7 +341,7 @@ function execute()
 end
 
 function cleanup()
-  for _, temp in pairs(temps) do
+  for temp, _ in pairs(temps) do
     if args["###"] then
       print("removing temporary " .. temp)
     else
@@ -394,13 +397,6 @@ function append(table, ...)
   return new
 end
 
-function has_suffix(str, ...)
-  for _, suffix in ipairs({...}) do
-    if str:lower():find(suffix .. "$") ~= nil then return true end
-  end
-  return false
-end
-
 function add_action(phase, input)
   local restype = phase_result(phase)
   actions[#actions+1] = {phase, input, restype}
@@ -414,6 +410,14 @@ function phase_result(phase)
   if phase == "compile" then return "obj" end
   if phase == "link" then return "binary" end
   assert(false, string.format("invalid phase '%s'", phase))
+end
+
+function has_suffix(str, ...)
+  for _, suffix in ipairs({...}) do
+    suffix = suffix:gsub("%.", "%%.")
+    if str:lower():match(suffix .. "$") ~= nil then return true end
+  end
+  return false
 end
 
 -- guess type of input file
@@ -454,7 +458,7 @@ end
 
 function make_temp(pattern)
   local attempt = pattern:gsub("?", "")
-  while exists(attempt) do
+  while exists(attempt) or temps[attempt] ~= nil do
     attempt = pattern:gsub("?", "-" .. randomString(3))
   end
   return attempt
