@@ -49,11 +49,15 @@ endif()
 
 find_package(CUDAh)
 
+set(MEKONG_CUDA_FLAGS "-O2" CACHE STRING "clang-cuda flags used to compile memtrace runtime")
+message(STATUS "Using MEKONG_CUDA_FLAGS:" ${MEKONG_CUDA_FLAGS})
+
 add_custom_command(OUTPUT "${LLVM_BINARY_DIR}/lib/libmekongrt.bc"
   COMMAND bin/clang++
     -std=c++11 -O3
     "-I${CMAKE_CURRENT_SOURCE_DIR}/Runtime/include"
     --cuda-host-only
+    ${MEKONG_CUDA_FLAGS}
     -c -emit-llvm -flto
     -o lib/libmekongrt.bc
     "${CMAKE_CURRENT_SOURCE_DIR}/Runtime/src/me-runtime.cu"
@@ -73,8 +77,13 @@ file(COPY Runtime/include/me-runtime.h
 install(FILES ${LLVM_BINARY_DIR}/include/mekong/me-runtime.h
   DESTINATION include/mekong)
 
-file(COPY lua/pprint.lua lua/yaml.lua lua/argparse.lua
+file(COPY
+  lua/yaml.lua
+  lua/argparse.lua
+  lua/pprint.lua
   DESTINATION ${LLVM_BINARY_DIR}/lib/lua)
-install(FILES ${LLVM_BINARY_DIR}/lib/lua/yaml.lua
-     ${LLVM_BINARY_DIR}/lib/lua/pprint.lua
+install(FILES
+  ${LLVM_BINARY_DIR}/lib/lua/yaml.lua
+  ${LLVM_BINARY_DIR}/lib/lua/argparse.lua
+  ${LLVM_BINARY_DIR}/lib/lua/pprint.lua
   DESTINATION lib/lua)
