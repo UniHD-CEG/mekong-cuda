@@ -101,6 +101,7 @@ function parse()
   for k, v in pairs(weird_args) do
     args[k] = v
   end
+  if args["g"] then args["g"] = "-g" end
 
   os_name = io.popen('uname -s','r'):read('*l')
 
@@ -301,7 +302,7 @@ function translate()
       cmd = { CLANG }
       cmd = append(cmd, "-x", "c")
       cmd = append(cmd, "-O"..args["O"], "-c")
-      cmd = append(cmd, args["g"] and "-g")
+      cmd = append(cmd, args["g"])
       cmd = append(cmd, args["std"])
       for _, include in ipairs(args["I"]) do
         cmd = append(cmd, "-I" .. include)
@@ -317,7 +318,7 @@ function translate()
       cmd = { CLANGXX }
       cmd = append(cmd, "-x", "c++")
       cmd = append(cmd, "-O"..args["O"], "-c")
-      cmd = append(cmd, args["g"] and "-g")
+      cmd = append(cmd, args["g"])
       cmd = append(cmd, args["std"])
       for _, include in ipairs(args["I"]) do
         cmd = append(cmd, "-I" .. include)
@@ -332,7 +333,7 @@ function translate()
     elseif binding[1] == "link" then
       cmd = { CLANGXX }
       cmd = append(cmd, "-O"..args["O"])
-      cmd = append(cmd, args["g"] and "-g")
+      cmd = append(cmd, args["g"])
       for _, libdir in ipairs(args["L"]) do
         cmd = append(cmd, "-L" .. libdir)
       end
