@@ -59,19 +59,3 @@ include_directories(
 add_definitions( -D_GNU_SOURCE )
 add_subdirectory(lib)
 add_subdirectory(tools)
-
-
-##################################################################################
-## package cmake config
-
-include(CMakePackageConfigHelpers)
-
-configure_package_config_file(
-    "cmake/config.cmake.in"
-    "${LLVM_BINARY_DIR}/lib/cmake/mekong-config.cmake"
-    INSTALL_DESTINATION "lib/cmake"
-)
-install(
-    FILES "${LLVM_BINARY_DIR}/lib/cmake/mekong-config.cmake"
-    DESTINATION "lib/cmake"
-)
