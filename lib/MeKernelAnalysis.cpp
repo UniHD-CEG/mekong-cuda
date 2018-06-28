@@ -417,6 +417,8 @@ Partitioning combinePartitioningSuggestions(const ArrayRef<Partitioning> suggest
 
 std::string partitioningToString(Partitioning part) {
   switch (part) {
+    case PART_NONE:
+      return "none";
     case PART_LINEAR_X:
       return "linear:x";
     case PART_LINEAR_Y:
@@ -467,6 +469,8 @@ struct MeKernelAnalysis : public FunctionPass {
       PACCSummary *PS = PAI.getAccessSummary(F, PACCSummary::SSK_COMPLETE);
       NVVMRewriter<PVMap, false> CudaRewriter;
       PS->rewrite(CudaRewriter);
+
+      bool splittable = true;
 
       // collect infos about arguments
       for (auto &arg : F.args()) {
@@ -566,6 +570,7 @@ struct MeKernelAnalysis : public FunctionPass {
           suggestions.push_back(guessPartitioning(M));
 
           isl_map_free(M);
+          splittable = splittable & kernelArg.isWriteInjective;
         }
         if (ArrayBounds) {
           isl_set_free(ArrayBounds);
@@ -582,8 +587,12 @@ struct MeKernelAnalysis : public FunctionPass {
       if (PartitioningSuggestion != "") {
         kernel->partitioning = PartitioningSuggestion;
       } else {
-        Partitioning suggestion = combinePartitioningSuggestions(suggestions);
-        kernel->partitioning = partitioningToString(suggestion);
+        if (splittable) {
+          Partitioning suggestion = combinePartitioningSuggestions(suggestions);
+          kernel->partitioning = partitioningToString(suggestion);
+        } else {
+          kernel->partitioning = "none";
+        }
       }
 
       // check if argument is a parameter to an isl map

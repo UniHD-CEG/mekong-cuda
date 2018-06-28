@@ -32,8 +32,8 @@ struct llvm::yaml::MappingTraits<Kernel> {
   static void mapping(IO &io, Kernel &info) {
     io.mapRequired("name", info.name);
     io.mapRequired("mangled-name", info.mangled_name);
-    io.mapRequired("partitioned-name", info.partitioned_name);
-    io.mapOptional("partitioning", info.partitioning);
+    io.mapRequired("partitioning", info.partitioning);
+    io.mapOptional("partitioned-name", info.partitioned_name);
     io.mapOptional("arguments", info.arguments);
   }
 };
