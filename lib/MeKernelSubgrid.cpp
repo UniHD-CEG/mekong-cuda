@@ -107,6 +107,7 @@ struct MeKernelSubgrid : public ModulePass {
   MeKernelSubgrid() : ModulePass(ID) {}
 
   typedef TypeBuilder<SubgridSpec, false> SubgridSpecT;
+  Type *subgridSpecT;
 
   SmallVector<std::pair<std::string, int>, 4> updatedKernels;
 
@@ -133,17 +134,19 @@ struct MeKernelSubgrid : public ModulePass {
     auto *OT = OF->getFunctionType();
     auto *RType = OT->getReturnType();
     SmallVector<Type*, 6> ParamTypes(OT->params().begin(), OT->params().end());
-    ParamTypes.push_back(SubgridSpecT::get(OF->getContext()));
+    ParamTypes.push_back(subgridSpecT->getPointerTo());
+
     FunctionType *NewFType = FunctionType::get(RType, ParamTypes, false);
-    (void)NewFType;
 
-
-    // reuse function if already found
+    // reuse function if already found, otherwise create
     Module *M = OF->getParent();
     Function *F = M->getFunction(Name.getSingleStringRef());
-    assert(F != nullptr && "No prototype found!");
+    if (F != nullptr) {
+      F->deleteBody();
+    } else {
+      F = cast<Function>(M->getOrInsertFunction(Name.getSingleStringRef(), NewFType));
+    } 
 
-    F->deleteBody();
 
     ValueToValueMapTy VM;
     auto *OArgsIt = OF->arg_begin();
@@ -253,6 +256,8 @@ struct MeKernelSubgrid : public ModulePass {
         M.getTargetTriple() != "nvptx-nvidia-cuda") {
       return false;
     }
+
+    subgridSpecT = SubgridSpecT::get(M.getContext());
 
     for (auto *K : getKernels(&M)) {
       const auto Name = K->getName();
