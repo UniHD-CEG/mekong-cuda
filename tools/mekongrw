@@ -344,7 +344,7 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
       {{fn for idx, argument in ipairs(kernel['arguments']) do
         if is_read(argument) then 
           print(fmt("      // synchronize reads for array %s", c_args[idx]))
-          print(fmt("      __me_buffer_sync_all_to(%s, 0);", c_args[idx]));
+          print(fmt("      __me_buffer_sync_all(%s, 0);", c_args[idx]));
         end
       end}}
       __me_sync();
@@ -359,7 +359,7 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
       {{fn for idx, argument in ipairs(kernel['arguments']) do
         if is_write(argument) then 
           print(fmt("      // synchronize reads for array %s", c_args[idx]))
-          print(fmt("      __me_buffer_update_all_to(%s, 0);", c_args[idx]));
+          print(fmt("      __me_buffer_update_all(%s, 0);", c_args[idx]));
         end
       end}}
     }
@@ -386,8 +386,13 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
       int _me_ngpus = __me_num_gpus();
 
       // populate params for polyhedral model
-      {{fn for idx, argument in ipairs(filter(kernel['arguments'], is_parameter)) do
-        print(fmt("    _me_params[%d] = (int64_t)%s;", idx-1, argument))
+      {{fn
+        local currIdx = 0
+        for idx, argument in ipairs(kernel['arguments'], is_parameter) do
+          if is_parameter(argument) then
+            print(fmt("      _me_params[%d] = (int64_t)%s;", currIdx, c_args[idx]))
+            currIdx = currIdx + 1
+          end
       end}}
       // synchronize arrays read arrays
       for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
