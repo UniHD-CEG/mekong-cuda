@@ -180,15 +180,6 @@ local function translate_argument(c_expr, argument, c_instance)
   end
 end
 
-local function is_splittable(kernel)
-  for _, arg in ipairs(kernel['arguments']) do
-    if arg['write-map'] ~= '' and arg['is-write-injective'] == false then
-      return false
-    end
-  end
-  return true
-end
-
 -------------------------------------------------------------------------------
 -- templating engine
 -------------------------------------------------------------------------------
@@ -335,39 +326,7 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
   }
 
   -- unsplittable
-  if not is_splittable(kernel) then
-    logf("WARNING: unsplittable kernel %s", name)
-
-    return string.template([[
-  // ++++++++ UNPARTITIONED KERNEL {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
-    {
-      {{fn for idx, argument in ipairs(kernel['arguments']) do
-        if is_read(argument) then 
-          print(fmt("      // synchronize reads for array %s", c_args[idx]))
-          print(fmt("      __me_buffer_sync_all(%s, 0);", c_args[idx]));
-        end
-      end}}
-      __me_sync();
-
-      cudaSetDevice(0);
-      {{ name }}<<< {{grid[1]}}, {{grid[2]}}, {{grid[3] or "0"}}, {{grid[4] or "0"}} >>>
-        ({{fn for idx, arg in ipairs(c_args) do
-          if idx > 1 then write(", ") end
-          write(translate_argument(arg, kernel['arguments'][idx], "0"))
-        end}});
-
-      {{fn for idx, argument in ipairs(kernel['arguments']) do
-        if is_write(argument) then 
-          print(fmt("      // synchronize reads for array %s", c_args[idx]))
-          print(fmt("      __me_buffer_update_all(%s, 0);", c_args[idx]));
-        end
-      end}}
-    }
-  // -------- UNPARTITIONED KERNEL {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
-    ]], env)
-
-  -- splittable
-  else 
+  if kernel['partitioning'] ~= 'none' then
 
     return string.template([[
 
@@ -446,6 +405,38 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
   // -------- {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
     ]], env)
 
+  -- splittable
+  else 
+
+    logf("unsplittable kernel %s", name)
+
+    return string.template([[
+  // ++++++++ UNPARTITIONED KERNEL {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
+    {
+      {{fn for idx, argument in ipairs(kernel['arguments']) do
+        if is_read(argument) then 
+          print(fmt("      // synchronize reads for array %s", c_args[idx]))
+          print(fmt("      __me_buffer_sync_all(%s, 0);", c_args[idx]));
+        end
+      end}}
+      __me_sync();
+
+      cudaSetDevice(0);
+      {{ name }}<<< {{grid[1]}}, {{grid[2]}}, {{grid[3] or "0"}}, {{grid[4] or "0"}} >>>
+        ({{fn for idx, arg in ipairs(c_args) do
+          if idx > 1 then write(", ") end
+          write(translate_argument(arg, kernel['arguments'][idx], "0"))
+        end}});
+
+      {{fn for idx, argument in ipairs(kernel['arguments']) do
+        if is_write(argument) then 
+          print(fmt("      // synchronize reads for array %s", c_args[idx]))
+          print(fmt("      __me_buffer_update_all(%s, 0);", c_args[idx]));
+        end
+      end}}
+    }
+  // -------- UNPARTITIONED KERNEL {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
+    ]], env)
   end
 end)
 
@@ -453,7 +444,7 @@ end)
 contents = substitute_include(contents, function(_, _)
   local decls = {}
   for name, kernel in pairs(kernels) do
-    if is_splittable(kernel) then
+    if kernel['partitioning'] ~= 'none' then
       local kernelDecl = string.format("extern \"C\" __global__ void %s(", partitioned_kernel_name(name))
       for _, arg in ipairs(kernel['arguments']) do
         kernelDecl = kernelDecl .. irttoc(arg['type-name']) .. ", "
