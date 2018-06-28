@@ -14,10 +14,22 @@
 #ifdef NOLOG
   #define MELOG(lvl, ...) do{;}while(0)
 #else
-  #define MELOG(lvl, ...) do{ if (lvl < meState.log_level) printf(__VA_ARGS__); }while(0)
+  #define MELOG(lvl, ...) do{ if (lvl < meState.log_level) { printf("%*s", lvl, ""); printf(__VA_ARGS__); } }while(0)
 #endif
 
 #define DEFAULTLOGLEVEL 0
+
+/* available log levels:
+ * 0 CRITICAL
+ * 1 ERROR
+ * 2 WARN
+ * 3 OPERATION
+ * 4 TRANSFER
+ * 5 INTERVAL
+ * 6 CHUNK
+ * 7 DEBUG
+ */
+
 
 typedef struct {
   bool initialized;

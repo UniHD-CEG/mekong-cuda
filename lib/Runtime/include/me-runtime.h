@@ -42,6 +42,9 @@ void __me_buffer_sync(void* buf, int forGPU, __me_itfn_t iterator,
     int elementSize, __subgrid_t* partitition, int64_t* params);
 void __me_buffer_update(void* buf, int forGPU, __me_itfn_t iterator,
     int elementSize, __subgrid_t* partitition, int64_t* params);
+// "dumb" versions ignoring memory access patterns
+void __me_buffer_sync_all(void* buf, int forGPU);
+void __me_buffer_update_all(void* buf, int forGPU);
 
 cudaError_t __me_buffer_gather(void* dst, const void* src, size_t count);
 cudaError_t __me_buffer_broadcast(void* dst, const void* src, size_t count);
