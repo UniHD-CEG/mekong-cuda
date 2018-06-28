@@ -593,9 +593,6 @@ struct MeCodegen : public ModulePass {
   /** Entry point of this pass
    */
   bool runOnModule(Module &M) override {
-
-    app.kernels.clear();
-
     if (M.getTargetTriple() == "nvptx64-nvidia-cuda" ||
         M.getTargetTriple() == "nvptx-nvidia-cuda")
       return false;
@@ -607,34 +604,12 @@ struct MeCodegen : public ModulePass {
 
     SmallVector<Function*,8> generatedIterators;
 
-    /*
-    // check if application model allows partitioning
-    bool errors = false;
     for (auto &kernel : app.kernels) {
-      for (auto &argument : kernel.arguments) {
-        if (argument.readMap != "" && !argument.isReadBounded) {
-          errs() << "!!! unbounded read: " << kernel.name << "." << argument.name << "\n";
-          errors = true;
-          continue;
-        }
-        if (argument.writeMap != "" && !argument.isWriteBounded) {
-          errs() << "!!! unbounded write: " << kernel.name << "." << argument.name << "\n";
-          errors = true;
-          continue;
-        }
-        if (argument.writeMap != "" && !argument.isWriteInjective) {
-          errs() << "!!! non-injective write: " << kernel.name << "." << argument.name << "\n";
-          errors = true;
-          continue;
-        }
+      // skip if not partitionable
+      if (kernel.partitioning == "none") {
+        continue;
       }
-    }
-    if (errors) {
-      report_fatal_error("Application model does not allow partitioning");
-    }
-    */
 
-    for (auto &kernel : app.kernels) {
       int argIdx = -1;
       for (auto &argument : kernel.arguments) {
         argIdx += 1;
@@ -688,6 +663,7 @@ struct MeCodegen : public ModulePass {
   }
 
   void deserialize(StringRef Infile) {
+    app.kernels.clear();
     auto res = MemoryBuffer::getFileAsStream(Infile);
     if (res) {
       app.deserialize(*(res.get()));
