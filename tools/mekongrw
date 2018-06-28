@@ -26,21 +26,25 @@ local function logf(msg, ...)
   io.stderr:write(string.format(msg, ...) .. "\n")
 end
 
--------------------------------------------------------------------------------
--- naming conventions
--------------------------------------------------------------------------------
+local function check_types(...)
+  local level = 2
+  local info = debug.getinfo(level, "nSl")
+  local i = 1
+  local type_spec = {...}
+  while true do
+    local name, value = debug.getlocal(level, i)
+    if not name then break end
 
-local function _kernel_name(kernel)
-  return string.format("__%s_subgrid", kernel)
+    if type(value) ~= type_spec[i] then
+      error(string.format("%s (%s:%d) expected %s for arg '%s' (%d), got %s",
+        info.name, info.short_src, info.linedefined, type_spec[i], name, i, type(value)))
+    end
+    i = i + 1
+  end
 end
 
-local function _kernel_iterator(kernel, array, mode)
-  assert(mode == "read" or mode == "write", "only read and write iterators supported")
-  return string.format("__%s_%d_%s", kernel, array, mode)
-end
-
 -------------------------------------------------------------------------------
--- substitution functions
+-- pattern matchers / substitutors
 -------------------------------------------------------------------------------
 
 local function substitute_function(str, from, to)
@@ -60,18 +64,18 @@ local function substitute_kernel_launch(str, fn)
                   "%s*<<<%s*(.-)%s*>>>%s*" ..        -- kernel grid configuration
                   "(%b())"..")%s*;"                   -- balanced parentheses (contains kernel arguments) + stop
   local CHECK = "[^()%[%]{}]"
-  str, num = string.gsub(str, PATTERN, function(whole, name, grid, args)
-    args = string.sub(args, 2, -2) -- remove parentheses arounds kernel arguments
+  str, num = string.gsub(str, PATTERN, function(whole, name, grid, c_args)
+    c_args = string.sub(c_args, 2, -2) -- remove parentheses arounds kernel arguments
     -- check if there are any forms of braces in any of the lists
     assert(string.match(grid, CHECK), "unsupported kernel grid configuration")
-    assert(string.match(args, CHECK), "unsupported kernel arguments")
+    assert(string.match(c_args, CHECK), "unsupported kernel arguments")
 
     -- split arguments to gridConfig into list
     local grid = string.split(grid, ",")
     -- split arguments to kernel into list
-    local args = string.split(args, ",")
+    local c_args = string.split(c_args, ",")
 
-    return fn(whole, name, grid, args)
+    return fn(whole, name, grid, c_args)
   end)
   --logf("%d kernel substitutions", num)
   return str
@@ -81,11 +85,11 @@ local function substitute_kernel_decl(str, fn)
   -- syntax: __global__%s+ $TYPE %s+ $NAME +%s ( $PARAMETERS )
   local ID = "[_a-zA-Z][_a-zA-Z0-9]*"
   local PATTERN = "(".."__global__%s+"..ID.."%s+("..ID..")%s*(%b())"..")"
-  str, num = string.gsub(str, PATTERN, function(whole, name, args)
-    args = string.sub(args, 2, -2) -- remove parentheses arounds kernel arguments
+  str, num = string.gsub(str, PATTERN, function(whole, name, c_args)
+    c_args = string.sub(c_args, 2, -2) -- remove parentheses arounds kernel arguments
     -- kernel argument list can not contain commas, so no check necessary
-    args = string.split(args, ",")
-    return fn(whole, name, args)
+    c_args = string.split(c_args, ",")
+    return fn(whole, name, c_args)
   end)
   return str
 end
@@ -94,8 +98,13 @@ local function substitute_include(str, fn)
   return fn("", "") .. str
 end
 
+-------------------------------------------------------------------------------
+-- name lookup / translation / querys
+-------------------------------------------------------------------------------
+
 -- translate typename from llvm ir to C
 local function irttoc(llvmname)
+  check_types('string')
   -- basic types
   local simple = {
     ["i8"] = "char",
@@ -123,8 +132,65 @@ local function irttoc(llvmname)
   error("unsupported llvm type: " .. llvmname)
 end
 
+local function partitioned_kernel_name(kernel)
+  check_types('string')
+  return string.format("__%s_subgrid", kernel)
+end
+
+local function partitioned_kernel_iterator(kernel, array, mode)
+  check_types('string', 'number', 'string')
+  assert(mode == "read" or mode == "write", "only read and write iterators supported")
+  return string.format("__%s_%d_%s", kernel, array, mode)
+end
+
+local function partition_fn_for(scheme)
+  check_types('string')
+  if scheme == "linear:x" then
+    return "__me_partition_linear_x"
+  elseif scheme == "linear:y" then
+    return "__me_partition_linear_y"
+  elseif scheme == "linear:z" then
+    return "__me_partition_linear_z"
+  else
+    error("invalid partitioning scheme: " .. scheme)
+  end
+end
+
+local function filter(values, test)
+  check_types('table', 'function')
+  local res = {}
+  for _, v in ipairs(values) do
+    if test(v) then res[#res+1] = v end
+  end
+  return res
+end
+
+-- translates an argument passed to a kernel launch depending on wether it is
+-- a pointer (= virtual buffer).
+-- c_expr:      c expression passed to kernel launch
+-- argument:   argument info from kernel analysis
+-- c_instance: c expression with instance number
+local function translate_argument(c_expr, argument, c_instance)
+  check_types('string', 'table', 'string')
+  if not argument['is-pointer'] then
+    return c_expr
+  else
+    local c_type = irttoc(argument['type-name'])
+    return string.format("(%s)__me_nth_array(%s, %s)", c_type, c_expr, c_instance)
+  end
+end
+
+local function is_splittable(kernel)
+  for _, arg in ipairs(kernel['arguments']) do
+    if arg['write-map'] ~= '' and arg['is-write-injective'] == false then
+      return false
+    end
+  end
+  return true
+end
+
 -------------------------------------------------------------------------------
--- string extensions
+-- templating engine
 -------------------------------------------------------------------------------
 
 -- split string by ','
@@ -221,7 +287,9 @@ for _, filename in ipairs(kernelinfos) do
   end
 end
 
+-------------------------------------------------------------------------------
 -- Substitutions
+-------------------------------------------------------------------------------
 
 local subs = {
   {"cudaMalloc",            "__meMalloc"},
@@ -235,167 +303,165 @@ for _, pair in ipairs(subs) do
   contents = substitute_function(contents, pair[1], pair[2])
 end
 
-contents = substitute_kernel_launch(contents, function(orig, name, grid, args)
+
+-------------------------------------------------------------------------------
+contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
   local kernel = kernels[name]
 
-  -- -- check read injectivity
-  -- invalidwrites = {}
-  --
-  -- for _, arg in pairs(kernel['arguments']) do
-  --   if arg['write-map'] ~= '' and not arg['is-write-injective'] then
-  --     invalidwrites[#invalidwrites+1] = string.format('kernel %s - argument %s', kernel['name'], arg['name'])
-  --   end
-  -- end
-  -- if #invalidwrites > 0 then
-  --   logf("non-injective writes:")
-  --   for _, msg in pairs(invalidwrites) do
-  --     logf("  %s", msg)
-  --   end
-  --   os.exit(1)
-  -- end
+  if kernel == nil then
+    logf("Kernel analysis not available for kernel %s", name)
+    os.exit(1)
+  end
 
   -- prepare template environment
   local env = {
     name = name,
     grid = grid,
-    args = args,
+    c_args = c_args,
     kernel = kernel,
     fmt = string.format,
     join = table.concat,
 
-    filterArgs = function(test)
-      local argIdx = 0
-      local idx = 0
-      local args = kernel['arguments']
-      return function ()
-        argIdx = argIdx + 1
-        while args[argIdx] ~= nil do
-          if test(args[argIdx]) then
-            idx = idx +  1
-            return idx, argIdx
-          end
-          argIdx = argIdx + 1
+    filter = filter,
+    _kernel_name = partitioned_kernel_name, 
+    _kernel_iterator = partitioned_kernel_iterator,
+    partition_fn_for = partition_fn_for,
+    translate_argument = translate_argument,
+
+    is_parameter = function(argument) return argument['is-parameter'] end,
+    is_read = function(argument) return argument['read-map'] ~= '' end,
+    is_write = function(argument) return argument['write-map'] ~= '' end,
+
+  }
+
+  -- unsplittable
+  if not is_splittable(kernel) then
+    logf("WARNING: unsplittable kernel %s", name)
+
+    return string.template([[
+  // ++++++++ UNPARTITIONED KERNEL {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
+    {
+      {{fn for idx, argument in ipairs(kernel['arguments']) do
+        if is_read(argument) then 
+          print(fmt("      // synchronize reads for array %s", c_args[idx]))
+          print(fmt("      __me_buffer_sync_all_to(%s, 0);", c_args[idx]));
         end
-        return nil
-      end
-    end,
+      end}}
+      __me_sync();
 
-    count = function(list, test)
-      local n = 0
-      for _, v in pairs(list) do
-        if test(v) then n = n + 1 end
-      end
-      return n
-    end,
+      cudaSetDevice(0);
+      {{ name }}<<< {{grid[1]}}, {{grid[2]}}, {{grid[3] or "0"}}, {{grid[4] or "0"}} >>>
+        ({{fn for idx, arg in ipairs(c_args) do
+          if idx > 1 then write(", ") end
+          write(translate_argument(arg, kernel['arguments'][idx], "0"))
+        end}});
 
-    _kernel_name =_kernel_name, 
-    _kernel_iterator = _kernel_iterator,
-
-    _kernel_partition = function(name)
-      local scheme = kernel['partitioning']
-      if scheme == "linear:x" then
-        return "__me_partition_linear_x"
-      elseif scheme == "linear:y" then
-        return "__me_partition_linear_y"
-      elseif scheme == "linear:z" then
-        return "__me_partition_linear_z"
-      else
-        error("invalid partitioning scheme: " .. scheme)
-      end
-    end,
-
-    passArg = function(argName, arg, partition)
-      if not arg['is-pointer'] then
-        return argName
-      else
-        return string.format("(%s)__me_nth_array(%s, %s)", irttoc(arg['type-name']), argName, partition)
-      end
-    end,
-  }
-  return string.template([[
-
-// ++++++++ {{name}} <<< {{join(grid, ", ")}} >>> ({{join(args, ", ")}})
-  {
-    dim3 _me_grid = {{ grid[1] }};
-    dim3 _me_block = {{ grid[2] }};
-    size_t _me_shared = {{ grid[3] or 0 }};
-    cudaStream_t _me_stream = {{ grid[4] or 0 }};
-
-    __subgrid_t _me_subgrid;
-    int64_t _me_params[{{ count(kernel.arguments, function(x) return x['is-parameter'] end) }}];
-    _me_subgrid.full.zdim = _me_block.z;
-    _me_subgrid.full.ydim = _me_block.y;
-    _me_subgrid.full.xdim = _me_block.x;
-    int _me_ngpus = __me_num_gpus();
-
-    // populate params for polyhedral model
-    {{fn for idx, argIdx in filterArgs(function(x) return x['is-parameter'] end) do
-      print(fmt("    _me_params[%d] = (int64_t)%s;", idx-1, args[argIdx]))
-    end}}
-    // synchronize arrays read arrays
-    for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
-      {{ _kernel_partition(name) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
-      __me_itfn_t _me_iter = NULL;
-      int _me_elsize = 0;
-      {{fn for idx, argIdx in filterArgs(function(x) return (x['read-map'] or '') ~= '' end) do
-        print(fmt("      // synchronize reads for array %s", args[argIdx]))
-        print(fmt("      _me_iter = %s;", _kernel_iterator(name, argIdx-1, 'read')))
-        print(fmt("      _me_elsize = %s / 8;", kernel['arguments'][argIdx]['element-bitsize']))
-        print(fmt("      __me_buffer_sync(%s, _me_i, _me_iter, _me_elsize, &_me_subgrid, _me_params);", args[argIdx]))
+      {{fn for idx, argument in ipairs(kernel['arguments']) do
+        if is_write(argument) then 
+          print(fmt("      // synchronize reads for array %s", c_args[idx]))
+          print(fmt("      __me_buffer_update_all_to(%s, 0);", c_args[idx]));
+        end
       end}}
     }
-    // sync so buffers are up to date
-    __me_sync();
+  // -------- UNPARTITIONED KERNEL {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
+    ]], env)
 
-    // launch kernels
-    for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
-      {{ _kernel_partition(name) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
-      unsigned int z = _me_subgrid.kernel.zmax - _me_subgrid.kernel.zmin;
-      unsigned int y = _me_subgrid.kernel.ymax - _me_subgrid.kernel.ymin;
-      unsigned int x = _me_subgrid.kernel.xmax - _me_subgrid.kernel.xmin;
-      cudaSetDevice(_me_i);
-      {{ _kernel_name(name) }}<<< dim3(x, y, z), _me_block, _me_shared, _me_stream >>>
-        ({{fn for idx, arg in ipairs(args) do
-           if idx > 1 then write(", ") end
-           write(passArg(arg, kernel['arguments'][idx], "_me_i"))
-         end}}, _me_subgrid.kernel);
-    }
+  -- splittable
+  else 
 
-    // update writes (parallel to kernel execution)
-    for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
-      {{ _kernel_partition(name) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
-      __me_itfn_t _me_iter = NULL;
-      int _me_elsize = 0;
-      {{fn for idx, argIdx in filterArgs(function(x) return (x['write-map'] or '') ~= '' end) do
-        print(fmt("      // update writes for array %s", args[argIdx]))
-        print(fmt("      _me_iter = %s;", _kernel_iterator(name, argIdx-1, 'write')))
-        print(fmt("      _me_elsize = %s / 8;", kernel['arguments'][argIdx]['element-bitsize']))
-        print(fmt("      __me_buffer_update(%s, _me_i, _me_iter, _me_elsize, &_me_subgrid, _me_params);", args[argIdx]))
+    return string.template([[
+
+  // ++++++++ PARTITIONED KERNEL {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
+    {
+      dim3 _me_grid = {{ grid[1] }};
+      dim3 _me_block = {{ grid[2] }};
+      size_t _me_shared = {{ grid[3] or 0 }};
+      cudaStream_t _me_stream = {{ grid[4] or 0 }};
+
+      __subgrid_t _me_subgrid;
+      int64_t _me_params[{{ #filter(kernel['arguments'], is_parameter) }}];
+      _me_subgrid.full.zdim = _me_block.z;
+      _me_subgrid.full.ydim = _me_block.y;
+      _me_subgrid.full.xdim = _me_block.x;
+      int _me_ngpus = __me_num_gpus();
+
+      // populate params for polyhedral model
+      {{fn for idx, argument in ipairs(filter(kernel['arguments'], is_parameter)) do
+        print(fmt("    _me_params[%d] = (int64_t)%s;", idx-1, argument))
       end}}
+      // synchronize arrays read arrays
+      for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
+        {{ partition_fn_for(kernel['partitioning']) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
+        __me_itfn_t _me_iter = NULL;
+        int _me_elsize = 0;
+        {{fn for idx, argument in ipairs(kernel['arguments']) do
+          if is_read(argument) then 
+            print(fmt("      // synchronize reads for array %s", c_args[idx]))
+            print(fmt("      _me_iter = %s;", _kernel_iterator(name, idx-1, 'read')))
+            print(fmt("      _me_elsize = %s / 8;", argument['element-bitsize']))
+            print(fmt("      __me_buffer_sync(%s, _me_i, _me_iter, _me_elsize, &_me_subgrid, _me_params);", c_args[idx]))
+          end
+        end}}
+      }
+      // sync so buffers are up to date
+      __me_sync();
+
+      // launch kernels
+      for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
+        {{ partition_fn_for(kernel['partitioning']) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
+        unsigned int z = _me_subgrid.kernel.zmax - _me_subgrid.kernel.zmin;
+        unsigned int y = _me_subgrid.kernel.ymax - _me_subgrid.kernel.ymin;
+        unsigned int x = _me_subgrid.kernel.xmax - _me_subgrid.kernel.xmin;
+        cudaSetDevice(_me_i);
+        {{ _kernel_name(name) }}<<< dim3(x, y, z), _me_block, _me_shared, _me_stream >>>
+          ({{fn for idx, arg in ipairs(c_args) do
+             if idx > 1 then write(", ") end
+             write(translate_argument(arg, kernel['arguments'][idx], "_me_i"))
+           end}}, _me_subgrid.kernel);
+      }
+
+      // update writes (parallel to kernel execution)
+      for (int _me_i = 0; _me_i < _me_ngpus; ++_me_i) {
+        {{ partition_fn_for(kernel['partitioning']) }}(&_me_subgrid, _me_i, _me_ngpus, _me_grid);
+        __me_itfn_t _me_iter = NULL;
+        int _me_elsize = 0;
+        {{fn for idx, argument in ipairs(kernel['arguments']) do
+          if is_write(argument) then
+            print(fmt("      // update writes for array %s", c_args[idx]))
+            print(fmt("      _me_iter = %s;", _kernel_iterator(name, idx-1, 'write')))
+            print(fmt("      _me_elsize = %s / 8;", argument['element-bitsize']))
+            print(fmt("      __me_buffer_update(%s, _me_i, _me_iter, _me_elsize, &_me_subgrid, _me_params);", c_args[idx]))
+          end
+        end}}
+      }
+      cudaSetDevice(0);
+      // wait for kernels to finish (necessary?)
+      //__me_sync();
     }
-    cudaSetDevice(0);
-    // wait for kernels to finish (necessary?)
-    __me_sync();
-  }
-// -------- {{name}} <<< {{join(grid, ", ")}} >>> ({{join(args, ", ")}})
-  ]], env)
+  // -------- {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
+    ]], env)
+
+  end
 end)
 
+-------------------------------------------------------------------------------
 contents = substitute_include(contents, function(_, _)
   local decls = {}
   for name, kernel in pairs(kernels) do
-    local kernelDecl = string.format("extern \"C\" __global__ void %s(", _kernel_name(name))
-    for _, arg in ipairs(kernel['arguments']) do
-      kernelDecl = kernelDecl .. irttoc(arg['type-name']) .. ", "
-    end
-    kernelDecl = kernelDecl .. " __subgrid_kernel_t) {}"
-    decls[#decls+1] = kernelDecl
-    for idx, arg in ipairs(kernel['arguments']) do
-      if arg['is-pointer'] then
-        decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
-        _kernel_iterator(name, idx-1, "read"));
-        decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
-        _kernel_iterator(name, idx-1, "write"));
+    if is_splittable(kernel) then
+      local kernelDecl = string.format("extern \"C\" __global__ void %s(", partitioned_kernel_name(name))
+      for _, arg in ipairs(kernel['arguments']) do
+        kernelDecl = kernelDecl .. irttoc(arg['type-name']) .. ", "
+      end
+      kernelDecl = kernelDecl .. " __subgrid_kernel_t) {}"
+      decls[#decls+1] = kernelDecl
+      for idx, arg in ipairs(kernel['arguments']) do
+        if arg['is-pointer'] then
+          decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
+          partitioned_kernel_iterator(name, idx-1, "read"));
+          decls[#decls+1] = string.format("extern \"C\" void %s(int64_t grid[], int64_t param[], __me_cbfn_t, void*)",
+          partitioned_kernel_iterator(name, idx-1, "write"));
+        end
       end
     end
   end
@@ -419,6 +485,7 @@ end}}
 ]], env)
 end)
 
+-------------------------------------------------------------------------------
 if output == '-' then
   print(contents)
 else
