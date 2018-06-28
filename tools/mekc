@@ -94,8 +94,8 @@ function parse()
 
   local cmd_args = rawget(_G, "arg") or {}
   weird_args = {}
-  weird_args["std"], cmd_args = parse_pattern("^-std=.*$", cmd_args)
-  weird_args["###"], cmd_args = parse_pattern("^-###$", cmd_args)
+  weird_args["std"], cmd_args = parse_pattern("^%-std=.*$", cmd_args)
+  weird_args["###"], cmd_args = parse_pattern("^%-###$", cmd_args)
 
   args = parser:parse(cmd_args)
   for k, v in pairs(weird_args) do
