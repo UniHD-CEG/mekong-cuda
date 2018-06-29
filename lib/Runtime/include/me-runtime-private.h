@@ -14,7 +14,7 @@
 #ifdef NOLOG
   #define MELOG(lvl, ...) do{;}while(0)
 #else
-  #define MELOG(lvl, ...) do{ if (lvl < meState.log_level) { printf("%*s", lvl, ""); printf(__VA_ARGS__); } }while(0)
+  #define MELOG(lvl, ...) do{ if (lvl <= meState.log_level) { printf("%*s", lvl, ""); printf(__VA_ARGS__); } }while(0)
 #endif
 
 #define DEFAULTLOGLEVEL 0
