@@ -108,8 +108,8 @@ local function irttoc(llvmname)
   -- basic types
   local simple = {
     ["i8"] = "char",
-    ["i16"] = "short",
-    ["i32"] = "int",
+    ["i16"] = "int16_t",
+    ["i32"] = "int32_t",
     ["i64"] = "int64_t",
     ["half"] = "half",
     ["float"] = "float",
@@ -120,9 +120,9 @@ local function irttoc(llvmname)
     return simple[llvmname]
   end
   -- simple pointer types
-  local ptrt = string.match(llvmname, "^[_a-zA-Z0-9]+[*]$")
-  if ptrt then
-    return ptrt
+  local ptrt = string.match(llvmname, "^([_a-zA-Z0-9]+)[*]$")
+  if ptrt and simple[ptrt] then
+    return simple[ptrt] .. "*"
   end
   -- struct pointer types
   local strptrt = string.match(llvmname, "^%%struct.([_a-zA-Z0-9]+[*])$")
