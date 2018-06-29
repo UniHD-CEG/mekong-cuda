@@ -30,7 +30,6 @@
  * 7 DEBUG
  */
 
-
 typedef struct {
   bool initialized;
   int numGPUs;
