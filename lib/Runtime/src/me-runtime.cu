@@ -81,6 +81,14 @@ void __me_initialize() {
   } else {
     meState.log_level = DEFAULTLOGLEVEL;
   }
+
+  const char* MESAFE = getenv("MESAFE");
+  if (!strcasecmp(MESAFE, "off") || !strcasecmp(MESAFE, "no") || !strcasecmp(MESAFE, "0") || !strcasecmp(MESAFE, "false")) {
+    meState.safe_mode = false;
+  } else {
+    meState.safe_mode = true;
+  }
+
   meState.initialized = true;
 }
 
@@ -415,11 +423,55 @@ cudaError_t __me_buffer_broadcast(void* dst, const void* src, size_t count) {
   VirtualBuffer *vb = (VirtualBuffer*)dst;
   MemTracker<int> &mt = vb->getTracker();
 
+
   MELOG(3, ":: buffer broadcast from host buffer %p\n", src);
 
-  int ref = vb->findOrInsertHostReference((void*)src); // :'(
-  mt.update(0, count, ref);
-  MELOG(4, PRITAGGING, (int64_t)0, (int64_t)count, vb, src, ref);
+  int tag = 0;
+  const void* buf = nullptr;
+
+  // create internalized shadow copies of host buffers to prevent WAR conflicts
+  if (meState.safe_mode) {
+    // try to find source buffer referenced in shadow list
+    size_t n = meState.shadows.size();
+    ShadowCopy* shadow = nullptr;
+    for (int i = 0; i < n; ++i) {
+      if (meState.shadows[i].reference == src) {
+        shadow = &meState.shadows[i];
+        break;
+      }
+    }
+
+    if (shadow) {
+      if (shadow->size >= count) { // existing shadow is big enough
+        tag = vb->findOrInsertHostReference((void*)shadow->shadow);
+        MELOG(4, ":: reusing shadow at %p (%d)\n", src, tag);
+        memcpy(shadow->shadow, src, count);
+      } else { // existing shadow too small, need to reallocate
+        tag = vb->findOrInsertHostReference((void*)shadow->shadow);
+        free(shadow->shadow);
+        shadow->shadow = malloc(count);
+        assert(shadow->shadow != nullptr);
+        vb->updateInstance(tag, shadow->shadow);
+        shadow->size = count;
+        MELOG(4, ":: reallocated buffer to %p (%d)\n", shadow->shadow, tag);
+        memcpy(shadow->shadow, src, count);
+      }
+    } else {
+      meState.shadows.push_back(ShadowCopy());
+      shadow = &meState.shadows.back();
+      shadow->reference = src;
+      shadow->shadow = malloc(count);
+      shadow->size = count;
+      tag = vb->findOrInsertHostReference((void*)shadow->shadow);
+      MELOG(4, ":: created shadow %p (%d)\n", shadow->shadow, tag);
+    }
+    buf = shadow->shadow;
+  } else {
+    tag = vb->findOrInsertHostReference((void*)src); // :'(
+    buf = src;
+  }
+  mt.update(0, count, tag);
+  MELOG(4, PRITAGGING, (int64_t)0, (int64_t)count, vb, buf, tag);
   return cudaSuccess;
 }
 
@@ -485,6 +537,7 @@ cudaError_t __meMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
 
 cudaError_t __meMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
   cudaError_t result;
+
   switch (kind) {
   case cudaMemcpyHostToDevice:
     result = __me_buffer_broadcast(dst, src, count);

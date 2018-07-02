@@ -63,7 +63,11 @@ add_custom_command(OUTPUT "${LLVM_BINARY_DIR}/lib/libmekongrt.bc"
     "${CMAKE_CURRENT_SOURCE_DIR}/Runtime/src/me-runtime.cu"
   
   WORKING_DIRECTORY "${LLVM_BINARY_DIR}"
-  DEPENDS Runtime/src/me-runtime.cu clang
+  DEPENDS Runtime/src/me-runtime.cu
+    Runtime/include/me-runtime.h
+    Runtime/include/me-runtime-private.h
+    Runtime/include/VirtualBuffer.h
+    clang
   VERBATIM
   )
 add_custom_target(libmekongrt ALL DEPENDS

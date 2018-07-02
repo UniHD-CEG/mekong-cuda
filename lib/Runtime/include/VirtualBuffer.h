@@ -4,6 +4,7 @@
 
 #include "btree_memtracker.h"
 #include <vector>
+#include <cstring>
 
 /*******************************************************************************
  * Virtual Buffer Class that replaces allocations from cudaMalloc.
@@ -64,6 +65,17 @@ public:
       assert(-i <= hostInstances.size() && "invalid host reference");
       return hostInstances[-i-1];
     } else return nullptr;
+  }
+
+  void updateInstance(int tag, void* newBuffer) {
+    assert(tag != 0 && "invalid instance");
+    if (tag > 0) {
+      assert(tag <= devInstances.size() && "invalid device instance");
+      devInstances[tag-1] = newBuffer;
+    } else if (tag < 0) {
+      assert(-tag <= hostInstances.size() && "invalid host reference");
+      hostInstances[-tag-1] = newBuffer;
+    }
   }
 
   const MemTracker<int>& getTracker() const {

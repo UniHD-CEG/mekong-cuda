@@ -2,7 +2,9 @@
 #define __ME_RUNTIME_PRIVATE
 
 #include <stdio.h>
+
 #include "VirtualBuffer.h"
+#include <vector>
 
 #undef assert
 #define assert(cond) do { if (!(cond)) { printf("%s\n", #cond); abort(); } } while (0)
@@ -14,7 +16,7 @@
 #ifdef NOLOG
   #define MELOG(lvl, ...) do{;}while(0)
 #else
-  #define MELOG(lvl, ...) do{ if (lvl <= meState.log_level) { printf("%*s", lvl, ""); printf(__VA_ARGS__); } }while(0)
+  #define MELOG(lvl, ...) do{ if (lvl <= meState.log_level) { printf("%*s", 2*lvl, ""); printf(__VA_ARGS__); } }while(0)
 #endif
 
 #define DEFAULTLOGLEVEL 0
@@ -31,9 +33,18 @@
  */
 
 typedef struct {
+  const void* reference;
+  void* shadow;
+  size_t size;
+} ShadowCopy;
+
+typedef struct {
   bool initialized;
   int numGPUs;
+  std::vector<ShadowCopy> shadows;
+
   int log_level;
+  bool safe_mode;
 } MeState;
 
 #endif
