@@ -11,8 +11,12 @@
 // format: ":: copying  start-offset .. end-offset, base_src (tag_src) -> base_dst (tag_dest)
 #define PRITRANSFER ":: copying %" PRId64 " .. %" PRId64 ", %p (%d) -> %p (%d)\n"
 #define PRITRANSFERHOST ":: copying %" PRId64 " .. %" PRId64 ", %p (%d) -> %p (N/A)\n"
+
 // format: ":: tagging  start-offset .. end-offset, virtualbuf = base (tag)
 #define PRITAGGING  ":: tagging %" PRId64 " .. %" PRId64 ", %p = %p (%d)\n"
+
+// format: ":: alloc size -> buf (tag)
+#define PRIALLOC  ":: alloc %lu -> %p (%d)\n"
 
 static MeState meState;
 
@@ -218,7 +222,7 @@ void __me_buffer_sync(void* buf, int forGPU, __me_itfn_t iterator,
   if (info.lastSrc != 0) {
     __me_sync_flush(&info);
   }
-  assert(cudaStreamSynchronize(0) == cudaSuccess);
+  //assert(cudaStreamSynchronize(0) == cudaSuccess);
 }
 
 /** Synchronize whole buffer for a given GPU, ignore memory access patterns.
@@ -450,7 +454,7 @@ cudaError_t __meMalloc(void** devPtr, size_t size) {
     void* dst;
     assert(cudaMalloc(&dst, size) == cudaSuccess && "unable to allocate buffer on device");
     vb->setDevInstance(i+1, dst); // devices: 1 .. inf
-    MELOG(4, ":: alloc %p : %p, size %lu\n", vb, dst, size);
+    MELOG(4, PRIALLOC, size, dst, i+1);
   }
   assert(cudaSetDevice(0) == cudaSuccess && "unable to reset device to first");
   *devPtr = (void*)vb;
