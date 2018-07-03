@@ -82,7 +82,7 @@ void __me_initialize() {
     meState.log_level = DEFAULTLOGLEVEL;
   }
 
-  static const char* YES[] = {"y", "yes", "on", "1", "true"};
+  static const char* YES[] = {"y", "yes", "on", "1", "true", "enable", "enabled"};
   const char* MEUNSAFE_ENV = getenv("MEUNSAFE");
   meState.safe_mode = true;
   if (MEUNSAFE_ENV != nullptr) {

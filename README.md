@@ -45,8 +45,26 @@ use the following command:
 For details about gpucc CUDA compilation, consult
 [Compiling CUDA with clang](https://llvm.org/docs/CompileCudaWithLLVM.html).
 
-Internally, two new compilation steps are added after preprocessing but
+Two new compilation steps are added after preprocessing but
 before compiling: "polyhedral analysis" and "rewriting".
 Analog to the `-c` switch, there is a new switch `-A` that terminates
 compilation after analysis and a switch `-R` that terminates compilation
 after rewriting the source code.
+
+# Application configuration
+
+Applications compiled with Mekong generally do not require configuration.
+However, there are some environmental variables that influence the behaviour
+of the mekong system, and therefore the application, at runtime.
+
+- `CUDA_VISIBLE_DEVICES`. Although not directly used by Mekong directly, this variable
+  determines the set of visible (= utilized) GPUs. Valid values are comma separated lists
+  of GPU indices starting at `0`. E.g. to only enable the first for available GPUs, use
+  `CUDA_VISIBLE_DEVICES=0,1,2,3`.
+- `MELOGLEVEL`. Set to numbers `0` to `8` to enable logging. Currently only
+  the log levels `3` through `7` are in used. Higher numbers correspond with more
+  detailed, verbose logging.
+- `MEUNSAFE`. Mekong defaults to the conservative approach to create internal copies of host
+  buffers to avoid WAR conflicts between the time of a `cudaMemcpy` and a kernel launch.
+  If there are guaranteed no writes to the host buffer during this time, unsafe mode might
+  be enabled to improve performance. Enable with `MEUNSAFE=yes`.
