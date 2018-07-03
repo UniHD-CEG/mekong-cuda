@@ -82,11 +82,16 @@ void __me_initialize() {
     meState.log_level = DEFAULTLOGLEVEL;
   }
 
-  const char* MESAFE = getenv("MESAFE");
-  if (!strcasecmp(MESAFE, "off") || !strcasecmp(MESAFE, "no") || !strcasecmp(MESAFE, "0") || !strcasecmp(MESAFE, "false")) {
-    meState.safe_mode = false;
-  } else {
-    meState.safe_mode = true;
+  static const char* YES[] = {"y", "yes", "on", "1", "true"};
+  const char* MEUNSAFE_ENV = getenv("MEUNSAFE");
+  meState.safe_mode = true;
+  if (MEUNSAFE_ENV != nullptr) {
+    for (int i = 0; i < sizeof(YES)/sizeof(YES[0]); ++i) {
+      if (strcasecmp(MEUNSAFE_ENV, YES[i]) == 0 ) {
+        meState.safe_mode = false;
+        break;
+      }
+    }
   }
 
   meState.initialized = true;
@@ -464,6 +469,7 @@ cudaError_t __me_buffer_broadcast(void* dst, const void* src, size_t count) {
       shadow->size = count;
       tag = vb->findOrInsertHostReference((void*)shadow->shadow);
       MELOG(4, ":: created shadow %p (%d)\n", shadow->shadow, tag);
+      memcpy(shadow->shadow, src, count);
     }
     buf = shadow->shadow;
   } else {
