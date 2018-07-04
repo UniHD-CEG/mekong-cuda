@@ -203,11 +203,25 @@ function pipeline()
 end
 
 function bind()
-  action_outs = {}
+  local action_outs = {}
   local base = ""
+
+  -- lookup table to have correct "include origin" (#include "something.h")
+  -- for rewritten .cua files, which (likely) have a different path than the
+  -- original .cu file.
+  -- maps: <full name of .cua> -> <directory of original cuda file>
+  local original_paths = {}
+
   for idx, action in ipairs(actions) do
+    -- collect inputs
     local inputs = {}
+    for _, input in ipairs(action[2]) do
+      inputs[#inputs+1] = action_outs[input]
+    end
+
     local out = nil
+    local include = nil
+
     if idx == #actions and args["o"] ~= nil then
       out = args["o"]
     else
@@ -218,8 +232,22 @@ function bind()
         out = make_temp(base .. "?.yaml")
       elseif action[1] == "rewrite" then
         out = make_temp(base .. "?.cua")
+        -- Hackish, this point is where we know the original path of the input.
+        -- We store it in the includes list so later binding steps can
+        -- look it up.
+        local input = action_outs[action[2][1]] -- .cu
+        original_paths[out] = dirname(input)
       elseif action[1] == "compile" then
         out = make_temp(base .. "?.o")
+        -- If we do not find an original path for a .cua, we know it has been
+        -- rewritten in a different run of mekc. In this case we can't do
+        -- anything and just issue a warning.
+        local input = action_outs[action[2][1]]
+        local dir = original_paths[input] -- .cua
+        if not dir then
+          print("warning: did not find iquote directory for " .. input)
+        end
+        include = dir
       elseif action[1] == "compile-c" then
         out = make_temp(base .. "?.o")
       elseif action[1] == "compile-c++" then
@@ -232,10 +260,9 @@ function bind()
       temps[out] = true
     end
     action_outs[idx] = out
-    for _, input in ipairs(action[2]) do
-      inputs[#inputs+1] = action_outs[input]
-    end
-    bindings[idx] = {action[1], inputs, out}
+
+
+    bindings[idx] = {action[1], inputs, out, include = include}
   end
 
   if args["ccc_print_bindings"] then
@@ -278,13 +305,18 @@ function translate()
 
     elseif binding[1] == "compile" then
       cmd = { CLANGXX }
-      cmd = append(cmd, "-x", "cuda")
+      if binding["include"] then
+        cmd = append(cmd, "-iquote")
+        cmd = append(cmd, binding["include"])
+      end
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
+      cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[2][2])
+      cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
+
+      cmd = append(cmd, "-x", "cuda")
       cmd = append(cmd, "-O"..args["O"], "-c", "-mllvm", "-mekong")
       cmd = append(cmd, args["g"])
       cmd = append(cmd, args["std"])
-      cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[2][2])
-      cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
       if args["cuda_path"] ~= nil then
         cmd = append(cmd, "--cuda-path=" .. args["cuda_path"])
       end
@@ -476,8 +508,19 @@ function guess_type(file)
   return "unknown"
 end
 
+-- returns path stripped of directories and extension
 function basename(path)
   return path:gsub("(.*/)(.*)", "%2"):gsub("(.*)(%..*)", "%1")
+end
+
+-- returns the directory part of path
+function dirname(path)
+  local dir = path:gsub("(.*)/.*", "%1")
+  if path == dir then
+    return "."
+  else
+    return dir
+  end
 end
 
 function exists(path)
