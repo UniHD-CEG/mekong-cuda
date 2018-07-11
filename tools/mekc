@@ -222,40 +222,43 @@ function bind()
     local out = nil
     local include = nil
 
+    -- if last step and user chose an output file, use that one.
     if idx == #actions and args["o"] ~= nil then
       out = args["o"]
-    else
-      if action[1] == "input" then
-        out = action[2][1]
-        base = basename(out)
-      elseif action[1] == "analyze" then
-        out = make_temp(base .. "?.yaml")
-      elseif action[1] == "rewrite" then
-        out = make_temp(base .. "?.cua")
-        -- Hackish, this point is where we know the original path of the input.
-        -- We store it in the includes list so later binding steps can
-        -- look it up.
-        local input = action_outs[action[2][1]] -- .cu
-        original_paths[out] = dirname(input)
-      elseif action[1] == "compile" then
-        out = make_temp(base .. "?.o")
-        -- If we do not find an original path for a .cua, we know it has been
-        -- rewritten in a different run of mekc. In this case we can't do
-        -- anything and just issue a warning.
-        local input = action_outs[action[2][1]]
-        local dir = original_paths[input] -- .cua
-        if not dir then
-          print("warning: did not find iquote directory for " .. input)
-        end
-        include = dir
-      elseif action[1] == "compile-c" then
-        out = make_temp(base .. "?.o")
-      elseif action[1] == "compile-c++" then
-        out = make_temp(base .. "?.o")
-      elseif action[1] == "link" then
-        out = "a.out"
-      end
     end
+
+    -- only set 'out' to temporary if not already set above
+    if action[1] == "input" then
+      out = out or action[2][1]
+      base = basename(out)
+    elseif action[1] == "analyze" then
+      out = out or make_temp(base .. "?.yaml")
+    elseif action[1] == "rewrite" then
+      out = out or make_temp(base .. "?.cua")
+      -- Hackish, this point is where we know the original path of the input.
+      -- We store it in the includes list so later binding steps can
+      -- look it up.
+      local input = action_outs[action[2][1]] -- .cu
+      original_paths[out] = dirname(input)
+    elseif action[1] == "compile" then
+      out = out or make_temp(base .. "?.o")
+      -- If we do not find an original path for a .cua, we know it has been
+      -- rewritten in a different run of mekc. In this case we can't do
+      -- anything and just issue a warning.
+      local input = action_outs[action[2][1]]
+      local dir = original_paths[input] -- .cua
+      if not dir then
+        print("warning: did not find iquote directory for " .. input)
+      end
+      include = dir
+    elseif action[1] == "compile-c" then
+      out = out or make_temp(base .. "?.o")
+    elseif action[1] == "compile-c++" then
+      out = out or make_temp(base .. "?.o")
+    elseif action[1] == "link" then
+      out = out or "a.out"
+    end
+
     if action[1] ~= "input" and idx ~= #actions then
       temps[out] = true
     end
