@@ -30,6 +30,52 @@ STATISTIC(NUM_DOMAINS, "Number of domains created");
 STATISTIC(NUM_EXPRESSIONS, "Number of expressions created");
 STATISTIC(COMPLEX_DOMAIN, "Number of domains to complex");
 
+// ------------------------------------------------------------------------- //
+
+PolyhedralValueInfoCache::~PolyhedralValueInfoCache() {
+  DeleteContainerSeconds(LoopMap);
+  DeleteContainerSeconds(ValueMap);
+  DeleteContainerSeconds(DomainMap);
+  ParameterMap.clear();
+}
+
+std::string PolyhedralValueInfoCache::getParameterNameForValue(Value &V) {
+  if (IntrinsicInst *Intr = dyn_cast<IntrinsicInst>(&V)) {
+    switch (Intr->getIntrinsicID()) {
+    case Intrinsic::nvvm_read_ptx_sreg_tid_x:
+      return "nvvm_tid_x";
+    case Intrinsic::nvvm_read_ptx_sreg_tid_y:
+      return "nvvm_tid_y";
+    case Intrinsic::nvvm_read_ptx_sreg_tid_z:
+      return "nvvm_tid_z";
+    case Intrinsic::nvvm_read_ptx_sreg_tid_w:
+      return "nvvm_tid_w";
+    default:
+      break;
+    }
+  }
+
+  if (V.hasName())
+    return V.getName().str();
+  return "p" + std::to_string(ParameterMap.size());
+}
+
+PVId PolyhedralValueInfoCache::getParameterId(Value &V, const PVCtx &Ctx) {
+  PVId &Id = ParameterMap[&V];
+  if (Id)
+    return Id;
+
+  std::string ParameterName = getParameterNameForValue(V);
+  ParameterName = PVBase::getIslCompatibleName("", ParameterName, "");
+  DEBUG(dbgs() << "NEW PARAM: " << V << " ::: " << ParameterName << "\n";);
+  Id = PVId(Ctx, ParameterName, &V);
+
+  return Id;
+}
+
+// ------------------------------------------------------------------------- //
+
+
 bool PolyhedralExpressionBuilder::combine(PEXP *PE, const PEXP *Other) {
   PE->Kind = std::max(PE->Kind, Other->Kind);
   if (PE->Kind == PEXP::EK_NON_AFFINE) {

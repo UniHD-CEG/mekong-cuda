@@ -53,6 +53,7 @@ class PVBase {
   virtual isl_space *getSpace() const = 0;
 
 public:
+  virtual ~PVBase() {};
   virtual std::string str() const;
 
   virtual bool isComplex() const { return false; }
@@ -115,7 +116,7 @@ public:
 
   bool operator<(const PVId &Other) const;
 
-  friend class PVLess<PVId>;
+  friend struct PVLess<PVId>;
 };
 
 class PVSet : public PVBase {

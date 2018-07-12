@@ -147,11 +147,11 @@ void PEXP::addInvalidDomain(const PVSet &ID) {
   // Sanity check
   assert(!KnownDomain || !PWA ||
          KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
-  assert(!InvalidDomain || !PWA ||
-         InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
-  assert(!KnownDomain || !InvalidDomain ||
-         KnownDomain.getNumInputDimensions() ==
-             InvalidDomain.getNumInputDimensions());
+  //assert(!InvalidDomain || !PWA ||
+         //InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
+  //assert(!KnownDomain || !InvalidDomain ||
+         //KnownDomain.getNumInputDimensions() ==
+             //InvalidDomain.getNumInputDimensions());
 }
 
 void PEXP::addKnownDomain(const PVSet &KD) {
@@ -211,51 +211,6 @@ void PEXP::adjustInvalidAndKnownDomain() {
   assert(!KnownDomain || KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
   assert(!InvalidDomain || InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
 }
-
-// ------------------------------------------------------------------------- //
-
-PolyhedralValueInfoCache::~PolyhedralValueInfoCache() {
-  DeleteContainerSeconds(LoopMap);
-  DeleteContainerSeconds(ValueMap);
-  DeleteContainerSeconds(DomainMap);
-  ParameterMap.clear();
-}
-
-std::string PolyhedralValueInfoCache::getParameterNameForValue(Value &V) {
-  if (IntrinsicInst *Intr = dyn_cast<IntrinsicInst>(&V)) {
-    switch (Intr->getIntrinsicID()) {
-    case Intrinsic::nvvm_read_ptx_sreg_tid_x:
-      return "nvvm_tid_x";
-    case Intrinsic::nvvm_read_ptx_sreg_tid_y:
-      return "nvvm_tid_y";
-    case Intrinsic::nvvm_read_ptx_sreg_tid_z:
-      return "nvvm_tid_z";
-    case Intrinsic::nvvm_read_ptx_sreg_tid_w:
-      return "nvvm_tid_w";
-    default:
-      break;
-    }
-  }
-
-  if (V.hasName())
-    return V.getName().str();
-  return "p" + std::to_string(ParameterMap.size());
-}
-
-PVId PolyhedralValueInfoCache::getParameterId(Value &V, const PVCtx &Ctx) {
-  PVId &Id = ParameterMap[&V];
-  if (Id)
-    return Id;
-
-  std::string ParameterName = getParameterNameForValue(V);
-  ParameterName = PVBase::getIslCompatibleName("", ParameterName, "");
-  DEBUG(dbgs() << "NEW PARAM: " << V << " ::: " << ParameterName << "\n";);
-  Id = PVId(Ctx, ParameterName, &V);
-
-  return Id;
-}
-
-// ------------------------------------------------------------------------- //
 
 // ------------------------------------------------------------------------- //
 

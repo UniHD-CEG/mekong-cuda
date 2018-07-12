@@ -17,6 +17,128 @@
 
 namespace llvm {
 
+/// A cache that maps values/basic blocks and scopes to the computed polyhedral
+/// representation (PEXP). The results for maximal scopes (nullptr) can be used
+/// in an inter-procedural setting.
+class PolyhedralValueInfoCache final {
+
+  /// Mapping from scoped basic blocks to their domain expressed as a PEXP.
+  using DomainMapKey = std::pair<BasicBlock *, Loop *>;
+  DenseMap<DomainMapKey, PEXP *> DomainMap;
+
+  /// Mapping from scoped values to their polyhedral representation.
+  using ValueMapKey = std::pair<Value *, Loop *>;
+  DenseMap<ValueMapKey, PEXP *> ValueMap;
+
+  /// Mapping from scoped loops to their backedge taken count.
+  using LoopMapKey = std::pair<const Loop *, Loop *>;
+  DenseMap<LoopMapKey, PEXP *> LoopMap;
+
+  /// Mapping from parameter values to their unique id.
+  DenseMap<Value *, PVId> ParameterMap;
+
+  /// Return or create and cache a PEXP for @p BB in @p Scope.
+  PEXP *getOrCreateDomain(BasicBlock &BB, Loop *Scope) {
+    auto *&PE = DomainMap[{&BB, Scope}];
+    if (!PE)
+      PE = new PEXP(&BB, Scope);
+
+    // Verify the internal state
+    assert(PE == lookup(BB, Scope));
+    return PE;
+  }
+
+  /// Return or create and cache a PEXP for @p V in @p Scope.
+  PEXP *getOrCreatePEXP(Value &V, Loop *Scope) {
+    auto *&PE = ValueMap[{&V, Scope}];
+    if (!PE)
+      PE = new PEXP(&V, Scope);
+
+    // Verify the internal state
+    assert(PE == lookup(V, Scope));
+    return PE;
+  }
+
+  /// Create or return a PEXP for the backedge taken count of @p L in @p Scope.
+  PEXP *getOrCreateBackedgeTakenCount(const Loop &L, Loop *Scope) {
+    auto *&PE = LoopMap[{&L, Scope}];
+    if (!PE)
+      PE = new PEXP(L.getHeader(), Scope);
+
+    // Verify the internal state
+    assert(PE == lookup(L, Scope));
+    return PE;
+  }
+
+  std::string getParameterNameForValue(Value &V);
+
+  /// Return the unique parameter id for @p V.
+  PVId getParameterId(Value &V, const PVCtx &Ctx);
+
+  friend class PolyhedralExpressionBuilder;
+
+public:
+  ~PolyhedralValueInfoCache();
+
+  /// Return the cached polyhedral representation of @p V in @p Scope, if any.
+  PEXP *lookup(Value &V, Loop *Scope) { return ValueMap.lookup({&V, Scope}); }
+
+  /// Return the cached polyhedral representation of @p BB in @p Scope, if any.
+  PEXP *lookup(BasicBlock &BB, Loop *Scope) {
+    return DomainMap.lookup({&BB, Scope});
+  }
+
+  /// Return the cached backedge taken count of @p L in @p Scope, if any.
+  PEXP *lookup(const Loop &L, Loop *Scope) {
+    return LoopMap.lookup({&L, Scope});
+  }
+
+  /// Forget the value for @p BB in @p Scope. Returns true if there was one.
+  bool forget(BasicBlock &BB, Loop *Scope) {
+    return DomainMap.erase({&BB, Scope});
+  }
+
+  /// Forget the value for @p V in @p Scope. Returns true if there was one.
+  bool forget(Value &V, Loop *Scope) {
+    return ValueMap.erase({&V, Scope});
+  }
+
+  /// Iterators for polyhedral representation of values.
+  ///{
+  using iterator = decltype(ValueMap)::iterator;
+  using const_iterator = decltype(ValueMap)::const_iterator;
+
+  iterator begin() { return ValueMap.begin(); }
+  iterator end() { return ValueMap.end(); }
+  const_iterator begin() const { return ValueMap.begin(); }
+  const_iterator end() const { return ValueMap.end(); }
+
+  iterator_range<iterator> values() { return make_range(begin(), end()); }
+  iterator_range<const_iterator> values() const {
+    return make_range(begin(), end());
+  }
+  ///}
+
+  /// Iterators for polyhedral domains of basic block.
+  ///{
+  using domain_iterator = decltype(DomainMap)::iterator;
+  using const_domain_iterator = decltype(DomainMap)::const_iterator;
+
+  domain_iterator domain_begin() { return DomainMap.begin(); }
+  domain_iterator domain_end() { return DomainMap.end(); }
+  const_domain_iterator domain_begin() const { return DomainMap.begin(); }
+  const_domain_iterator domain_end() const { return DomainMap.end(); }
+
+  iterator_range<domain_iterator> domains() {
+    return make_range(domain_begin(), domain_end());
+  }
+  iterator_range<const_domain_iterator> domains() const {
+    return make_range(domain_begin(), domain_end());
+  }
+  ///}
+};
+
+
 class PolyhedralExpressionBuilder
     : public InstVisitor<PolyhedralExpressionBuilder, PEXP *> {
 

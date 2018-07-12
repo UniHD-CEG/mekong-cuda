@@ -196,7 +196,7 @@ private:
 
   const PEXP *findMultidimensionalViewSize(
       PolyhedralValueInfo &PI, ArrayRef<const PEXP *> PEXPs,
-      SmallVectorImpl<std::pair<Instruction *, const PEXP *>>
+      DenseSet<std::pair<Instruction *, const PEXP *>>
           &InstsAndRemainders);
 
   void findMultidimensionalView(PolyhedralValueInfo &PI,

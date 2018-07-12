@@ -8,8 +8,11 @@
 //===----------------------------------------------------------------------===//
 //
 // Analysis to create polyhedral abstractions for values, instructions and
-// iteration domains. These abstractions are parametric, piece-wise affine
-// functions with loop-iteration granularity.
+// iteration domains. These abstractions are symbolic, piece-wise affine
+// functions with loop-iteration granularity. See the PEXP class comment for
+// more information and examples.
+//
+//
 //
 // Parts of the code and ideas have been ported from the Polly [0] project.
 //
@@ -31,9 +34,12 @@ class Region;
 class PolyhedralValueInfo;
 class PolyhedralExpressionBuilder;
 
-/// Polyhedral representation of a value (or basic block) in a scope. The values
-/// are expressed with regards to loop iterations. The scope defines which loop
-/// iterations are represented explicitly and which are kept parametric.
+/// Polyhedral representation of a value (incl. basic block) defined in a scope
+/// and evaluated at a certain program point. The values are expressed with
+/// regards to loop iterations and symbolic in any expression outside the scope
+/// as well as non-affine or dynamic expression inside of it. Thus, the scope
+/// defines which loop iterations are represented explicitly and which are
+/// treated as unknown but fixed.
 ///
 /// For the value of j in following two dimensional loop nest there are three
 /// different PEXP values depending on the scope.
@@ -48,13 +54,14 @@ class PolyhedralExpressionBuilder;
 ///          |                                  | in one iteration of the j-loop
 /// i-loop   | [i] -> { [l1]    -> [(i + l1)] } | Parametric value of i plus the
 ///          |                                  | current loop iteration (j) of
-///          |                                  | the innermost loop
+///          |                                  | the innermost loop (here l1)
 /// max/none | [] -> { [l0, l1] -> [(l0 + l1)]} | Sum of the current iterations
 ///          |                                  | in the i-loop and j-loop
 ///            /\       /\           /\
 ///            ||       ||           ||
-///       parameters    ||          value
+///      parameters     ||          value
 ///                 loop iterations
+///
 ///
 /// The domain of S in the above example also depends on the scope and can be
 /// one of the following:
@@ -78,18 +85,22 @@ class PolyhedralExpressionBuilder;
 ///            /\       /\           /\         /\
 ///            ||       ||           ||         ||
 ///       parameters    ||   (fixed) value (1)  ||
-///                 loop iterations          constraints
+///                 loop iterations   /\     constraints
+///                                   ||
+///                        implementation artifact
 ///
-/// Note that iterations are always "normalized", thus they are expressed as a
-/// range from 0 to the number of iterations. The value part of the polyhedral
-/// representation will compensate for non-zero initial values or strides not
-/// equal to one.
+/// Note that loop iterations are always "normalized", thus they are expressed
+/// as a range from 0 to the maximal number of iterations with a step of one.
+/// The value part of the polyhedral representation will compensate for non-zero
+/// initial values or non-unit strides.
 ///
 /// If a scope loop is given, the PEXP will not contain information about any
 /// expressions outside that loop. Otherwise, the PEXP will represent all
 /// expressions that influence the value in question until the representation
 /// would become non-affine. Instead of a non-affine (thus invalid) result the
 /// non-affine part is represented as a parameter.
+///
+/// The user loop ... TODO
 ///
 /// TODO: Describe invalid and known domain.
 ///
@@ -106,7 +117,8 @@ public:
   };
 
   /// Create a new, uninitialized polyhedral expression for @p Val.
-  PEXP(Value *Val, Loop *Scope) : Kind(EK_NONE), Val(Val), Scope(Scope) {}
+  PEXP(Value *Val, Loop *Scope)
+      : Kind(EK_NONE), Val(Val), Scope(Scope), UseScope(nullptr) {}
 
   /// Return the value this PEXP represents.
   Value *getValue() const { return Val; }
@@ -153,6 +165,9 @@ private:
   /// The scope of this polyhedral expression.
   Loop *const Scope;
 
+  /// The use program point expressed in terms of a loop.
+  Loop *const UseScope;
+
   /// The value represented as (p)iece-(w)ise (a)ffine function.
   PVAff PWA;
 
@@ -186,126 +201,6 @@ private:
   friend class PolyhedralExpressionBuilder;
 };
 
-/// A cache that maps values/basic blocks and scopes to the computed polyhedral
-/// representation (PEXP). The results for maximal scopes (nullptr) can be used
-/// in an inter-procedural setting.
-class PolyhedralValueInfoCache final {
-
-  /// Mapping from scoped basic blocks to their domain expressed as a PEXP.
-  using DomainMapKey = std::pair<BasicBlock *, Loop *>;
-  DenseMap<DomainMapKey, PEXP *> DomainMap;
-
-  /// Mapping from scoped values to their polyhedral representation.
-  using ValueMapKey = std::pair<Value *, Loop *>;
-  DenseMap<ValueMapKey, PEXP *> ValueMap;
-
-  /// Mapping from scoped loops to their backedge taken count.
-  using LoopMapKey = std::pair<const Loop *, Loop *>;
-  DenseMap<LoopMapKey, PEXP *> LoopMap;
-
-  /// Mapping from parameter values to their unique id.
-  DenseMap<Value *, PVId> ParameterMap;
-
-  /// Return or create and cache a PEXP for @p BB in @p Scope.
-  PEXP *getOrCreateDomain(BasicBlock &BB, Loop *Scope) {
-    auto *&PE = DomainMap[{&BB, Scope}];
-    if (!PE)
-      PE = new PEXP(&BB, Scope);
-
-    // Verify the internal state
-    assert(PE == lookup(BB, Scope));
-    return PE;
-  }
-
-  /// Return or create and cache a PEXP for @p V in @p Scope.
-  PEXP *getOrCreatePEXP(Value &V, Loop *Scope) {
-    auto *&PE = ValueMap[{&V, Scope}];
-    if (!PE)
-      PE = new PEXP(&V, Scope);
-
-    // Verify the internal state
-    assert(PE == lookup(V, Scope));
-    return PE;
-  }
-
-  /// Create or return a PEXP for the backedge taken count of @p L in @p Scope.
-  PEXP *getOrCreateBackedgeTakenCount(const Loop &L, Loop *Scope) {
-    auto *&PE = LoopMap[{&L, Scope}];
-    if (!PE)
-      PE = new PEXP(L.getHeader(), Scope);
-
-    // Verify the internal state
-    assert(PE == lookup(L, Scope));
-    return PE;
-  }
-
-  std::string getParameterNameForValue(Value &V);
-
-  /// Return the unique parameter id for @p V.
-  PVId getParameterId(Value &V, const PVCtx &Ctx);
-
-  friend class PolyhedralExpressionBuilder;
-
-public:
-  ~PolyhedralValueInfoCache();
-
-  /// Return the cached polyhedral representation of @p V in @p Scope, if any.
-  PEXP *lookup(Value &V, Loop *Scope) { return ValueMap.lookup({&V, Scope}); }
-
-  /// Return the cached polyhedral representation of @p BB in @p Scope, if any.
-  PEXP *lookup(BasicBlock &BB, Loop *Scope) {
-    return DomainMap.lookup({&BB, Scope});
-  }
-
-  /// Return the cached backedge taken count of @p L in @p Scope, if any.
-  PEXP *lookup(const Loop &L, Loop *Scope) {
-    return LoopMap.lookup({&L, Scope});
-  }
-
-  /// Forget the value for @p BB in @p Scope. Returns true if there was one.
-  bool forget(BasicBlock &BB, Loop *Scope) {
-    return DomainMap.erase({&BB, Scope});
-  }
-
-  /// Forget the value for @p V in @p Scope. Returns true if there was one.
-  bool forget(Value &V, Loop *Scope) {
-    return ValueMap.erase({&V, Scope});
-  }
-
-  /// Iterators for polyhedral representation of values.
-  ///{
-  using iterator = decltype(ValueMap)::iterator;
-  using const_iterator = decltype(ValueMap)::const_iterator;
-
-  iterator begin() { return ValueMap.begin(); }
-  iterator end() { return ValueMap.end(); }
-  const_iterator begin() const { return ValueMap.begin(); }
-  const_iterator end() const { return ValueMap.end(); }
-
-  iterator_range<iterator> values() { return make_range(begin(), end()); }
-  iterator_range<const_iterator> values() const {
-    return make_range(begin(), end());
-  }
-  ///}
-
-  /// Iterators for polyhedral domains of basic block.
-  ///{
-  using domain_iterator = decltype(DomainMap)::iterator;
-  using const_domain_iterator = decltype(DomainMap)::const_iterator;
-
-  domain_iterator domain_begin() { return DomainMap.begin(); }
-  domain_iterator domain_end() { return DomainMap.end(); }
-  const_domain_iterator domain_begin() const { return DomainMap.begin(); }
-  const_domain_iterator domain_end() const { return DomainMap.end(); }
-
-  iterator_range<domain_iterator> domains() {
-    return make_range(domain_begin(), domain_end());
-  }
-  iterator_range<const_domain_iterator> domains() const {
-    return make_range(domain_begin(), domain_end());
-  }
-  ///}
-};
 
 /// Analysis to create polyhedral abstractions for values, instructions and
 /// iteration domains.
