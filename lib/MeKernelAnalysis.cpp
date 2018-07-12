@@ -199,8 +199,10 @@ bool filterMatches(const Function &F, StringRef filter) {
  */
 __isl_give isl_map* renameCudaIntrinsics(__isl_take isl_map* map, isl_dim_type dimType) {
   const Twine pairs[][2] = {
+    {"nvvm_nctaid", "gdim"},
     {"nvvm_block_offset", "boff"},
     {"nvvm_ctaid", "bid"},
+    {"nvvm_ntid", "bdim"},
     {"nvvm_tid", "tid"},
   };
   const Twine suffixes[] = {"_x", "_y", "_z"};
