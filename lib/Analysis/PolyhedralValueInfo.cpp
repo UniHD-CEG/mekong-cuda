@@ -55,9 +55,7 @@ raw_ostream &llvm::operator<<(raw_ostream &OS, PEXP::ExpressionKind Kind) {
 
 PEXP *PEXP::setDomain(const PVSet &Domain, bool Overwrite) {
   assert((!PWA || Overwrite) && "PWA already initialized");
-  DEBUG(dbgs() << "SetDomain: " << Domain << " for " << Val->getName() << "\n");
   if (Domain.isComplex()) {
-    DEBUG(dbgs() << "Domain too complex!\n");
     return invalidate();
   }
 
@@ -132,15 +130,11 @@ PEXP &PEXP::operator=(PEXP &&PE) {
 }
 
 void PEXP::addInvalidDomain(const PVSet &ID) {
-  DEBUG(dbgs() << " ID increase: " << ID << " for " << getValue()->getName()
-               << "\n");
   InvalidDomain.unify(ID);
   if (InvalidDomain.isUniverse()) {
-    DEBUG(errs() << " => invalid domain is the universe domain. Invalidate!\n");
     invalidate();
   }
   if (InvalidDomain.isComplex()) {
-    DEBUG(errs() << " => invalid domain is too complex. Invalidate!\n");
     invalidate();
   }
 
@@ -155,11 +149,8 @@ void PEXP::addInvalidDomain(const PVSet &ID) {
 }
 
 void PEXP::addKnownDomain(const PVSet &KD) {
-  DEBUG(dbgs() << " KD increase: " << KD << " for " << getValue()->getName()
-               << "\n");
   KnownDomain.intersect(KD);
   if (KnownDomain.isComplex()) {
-    DEBUG(errs() << " => known domain is too complex. Drop it!\n");
     KnownDomain = PVSet::universe(KnownDomain);
   }
   PWA.simplify(KnownDomain);
@@ -353,8 +344,6 @@ bool PolyhedralValueInfo::hasScope(Value &V, const Region &RegionScope,
   if (!I || !isVaryingInScope(*I, RegionScope, Strict, NoAlias))
     return true;
 
-  DEBUG(dbgs() << "Value " << V << " does not have scope "
-               << RegionScope.getNameStr() << "\n");
   return false;
 }
 
@@ -375,8 +364,6 @@ bool PolyhedralValueInfo::hasScope(Value &V, Loop *Scope,
   if (!I || !isVaryingInScope(*I, Scope, Strict, NoAlias))
     return true;
 
-  DEBUG(dbgs() << "Value " << V << " does not have scope "
-               << (Scope ? Scope->getName() : "<max>") << "\n");
   return false;
 }
 
@@ -502,13 +489,11 @@ bool PolyhedralValueInfo::isKnownToHold(Value *LHS, Value *RHS,
 
 void PolyhedralValueInfo::print(raw_ostream &OS) const {
   auto &PVIC = PEBuilder->getPolyhedralValueInfoCache();
-  errs() << "\nDOMAINS:\n";
   for (auto &It : PVIC.domains()) {
     Loop *L = It.first.second;
     OS << "V: " << It.first.first->getName() << " in "
        << (L ? L->getName() : "<max>") << ":\n\t" << It.second << "\n";
   }
-  errs() << "\nVALUES:\n";
   for (auto &It : PVIC) {
     Loop *L = It.first.second;
     OS << "V: " << *It.first.first << " in " << (L ? L->getName() : "<max>")

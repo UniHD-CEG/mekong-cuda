@@ -100,12 +100,6 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
   if (PEXPs.empty())
     return nullptr;
 
-  DEBUG({
-    dbgs() << "Find multi dim view sizes for:\n";
-    for (const auto *PE : PEXPs)
-      dbgs() << "\t - " << PE->getPWA() << " [" << *PE->getValue() << "]\n";
-  });
-
   SmallPtrSet<Value *, 4> DomainParameterSet;
   DenseMap<Value *, SmallVector<const PEXP*, 4>> ExprParameterMap;
   SmallVector<Value *, 4> ParameterVector;
@@ -120,10 +114,6 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
     DomainParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
   }
 
-  DEBUG(dbgs() << "Found " << ExprParameterMap.size()
-               << " expression parameters\nFound " << DomainParameterSet.size()
-               << " domain parameters\n");
-
   for (Value *V : DomainParameterSet)
     ExprParameterMap.erase(V);
 
@@ -134,16 +124,13 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
     Value *V = It.first;
     auto *I = dyn_cast<Instruction>(V);
     if (!I) {
-      DEBUG(dbgs() << "\tSkip non instruction: " << *V << "\n");
       continue;
     }
 
     if (I->getOpcode() != Instruction::Mul) {
-      DEBUG(dbgs() << "\tSkip non multiplication: " << *I << " (TODO?)\n");
       continue;
     }
 
-    DEBUG(dbgs() << "\tPossible multi dim view computation: " << *I << "\n");
     Value *Op0 = I->getOperand(0);
     Value *Op1 = I->getOperand(1);
 
@@ -160,13 +147,6 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
   for (const PEXP *PE : PEXPs) {
 
   }
-
-  DEBUG({
-    dbgs() << "Found " << PotentialSizes.size() << " potential sizes:\n";
-    for (auto &It : PotentialSizes) {
-      dbgs() << "- " << It.first << " : " << It.second.size() << "\n";
-    }
-  });
 
   if (PotentialSizes.empty()) {
     return nullptr;
@@ -194,15 +174,7 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
     }
   }
 
-  DEBUG({
-    if (PotentialSize)
-      dbgs() << "Potential size: " << PotentialSize << "\n";
-    else
-      dbgs() << "No potential size found!\n";
-  });
-
   if (!PotentialSize) {
-    DEBUG(dbgs() << "TODO: choose potential size!\n");
     return nullptr;
   }
 
@@ -227,7 +199,6 @@ void PACCSummary::findMultidimensionalView(PolyhedralValueInfo &PI,
     unsigned IARSize = InstsAndRemainders.size();
     const PEXP *DimSize =
         findMultidimensionalViewSize(PI, PEXPs, InstsAndRemainders);
-    DEBUG(dbgs() << "DimSize: " << DimSize << "\n");
     if (!DimSize)
       return;
 
@@ -236,7 +207,6 @@ void PACCSummary::findMultidimensionalView(PolyhedralValueInfo &PI,
     MDVI.DimensionSizes.push_back(DimSize);
     unsigned CurDim = MDVI.DimensionSizes.size();
     for (const auto &InstAndRemainder : InstsAndRemainders) {
-      DEBUG(dbgs() << "Inst And Remainder: " << *InstAndRemainder.first << " : " << *InstAndRemainder.second << "\n");
       auto &DimInfo = MDVI.DimensionInstsMap[InstAndRemainder.first];
       PEXPs.push_back(InstAndRemainder.second);
       if (!DimInfo.second)
@@ -267,7 +237,6 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
     Value *BasePointer = It.first;
     auto &PACCVector = It.second;
 
-    DEBUG(dbgs() << "\n\nAI:\n");
     ArrayInfo *&AI = ArrayInfoMap[BasePointer];
     AI = new ArrayInfo();
 
@@ -280,23 +249,15 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
       AI->ElementSize = GreatestCommonDivisor64(
           AI->ElementSize, getElementSize(PA->getPointer(), DL));
     }
-    DEBUG(dbgs() << "ElementSize: " << AI->ElementSize << "\n");
 
     MultiDimensionalViewInfo MDVI(AI->DimensionSizes);
     findMultidimensionalView(PI, MDVI, PACCVector);
-
-    DEBUG({
-      dbgs() << "Dimension sizes:\n";
-      for (const PEXP *PE : AI->DimensionSizes)
-        dbgs() << "\t - " << PE->getPWA() << "\n";
-    });
 
     for (const PACC *PA : PACCVector) {
       PVAff PWA = PA->getPEXP()->getPWA();
       PWA.floordiv(AI->ElementSize);
 
       SmallVector<PVAff, 4> DimPWAs;
-      DEBUG(dbgs() << "\n\nPWA:" << PWA << "\n");
 
       SmallVector<SmallVector<std::pair<Instruction *, const PEXP *>, 4>, 4>
           Dimensions;
@@ -304,9 +265,7 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
       for (const auto &It : MDVI.DimensionInstsMap) {
         assert(It.second.first > 0);
         unsigned Dim = It.second.first - 1;
-        DEBUG(dbgs() << "Dim: " << Dim << "\nInst: " << *It.first << "\n");
         auto &DimInfo = Dimensions[Dim];
-        errs() << *It.second.second << "\n";
         //assert(DimInfo.first == nullptr && DimInfo.second == nullptr);
         //DimInfo.first = It.first;
         //DimInfo.second = It.second.second;
@@ -315,61 +274,41 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
 
       DimPWAs.resize(Dimensions.size() + 1);
 
-      DEBUG(dbgs() << "#DimPWAs: " << DimPWAs.size() << "\n");
       int LastDim = Dimensions.size();
-      //errs() << PWA << "\n";
-      //errs() << "LD: " << LastDim << "\n";
       assert(!DimPWAs[LastDim]);
       DimPWAs[LastDim] = PWA;
 
       for (int Dim = 0; Dim < LastDim; Dim++) {
-        DEBUG(dbgs() << "Dim: " << Dim << "\n");
         auto &DimInfo = Dimensions[Dim];
         assert(DimInfo.size());
 
         PVAff &LastPWA = DimPWAs[LastDim - Dim];
-        DEBUG(dbgs() << "LastPWA: " << LastPWA << "\n");
 
         for (auto &It : DimInfo) {
-          DEBUG(dbgs() << "DimInfoIt: " << *It.first << " => " << It.second
-                       << "\n");
           PVId PId = PI.getParameterId(*It.first);
           PVAff Coeff = LastPWA.getParameterCoeff(PId);
-          DEBUG(dbgs() << "Coeff " << Coeff << "\n");
           assert(!Coeff || Coeff.isConstant());
           if (!Coeff || Coeff.isEqual(PVAff(Coeff, 0)))
             continue;
 
           PVAff &DimPWA = DimPWAs[LastDim - Dim - 1];
-          //if (DimPWA && DimPWA.isConstant()) {
-            //errs() << "DPWA: " << DimPWA << "\n";
-            //errs() << "NPWA: " << It.second->getPWA() << "\n";
-            //continue;
-          //}
           assert(!DimPWA || DimPWA.isEqual(It.second->getPWA()));
 
-          DEBUG(dbgs() << "Rem: " << It.second->getPWA() << "\n";);
           DimPWA = It.second->getPWA();
           DimPWA.multiply(Coeff);
 
           const PVAff &Size = AI->DimensionSizes[Dim]->getPWA();
-          DEBUG(dbgs() << "Size: " << Size << "\n");
           PVAff SizeFactor = LastPWA.extractFactor(Size);
-          DEBUG(dbgs() << "SizeFactor: " << SizeFactor << "\n");
           if (SizeFactor) {
             DimPWA.add(SizeFactor);
             LastPWA.sub(SizeFactor.multiply(Size));
           }
           LastPWA.sub(Coeff.multiply(PVAff(PId)));
-
-          DEBUG(dbgs() << "Dim: " << Dim << " => " << DimPWA << " [" << LastPWA
-                       << "]\n");
         }
       }
 
       PVMap Map(DimPWAs, PA->getId());
       Map.dropUnusedParameters();
-      DEBUG(dbgs() << "MAP: " << Map << "\n");
 
       SmallVector<PVId, 4> Parameters;
       Map.getParameters(Parameters);
@@ -382,11 +321,9 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
 
         // TODO approximate.
 
-        DEBUG(dbgs() << "Eliminate param " << PId << "\n");
         IsMayAccess = true;
         Map.eliminateParameter(PId);
       }
-      DEBUG(dbgs() << "Final MAP: " << Map << "\n");
 
       AI->AccessMultiDimMap[PA] = Map;
 
@@ -402,9 +339,6 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
           AI->MustReadMap.union_add(Map);
       }
     }
-
-    DEBUG(dbgs() << "AI Read: " << AI->MustReadMap << "\n";
-          dbgs() << "AI Write: " << AI->MustWriteMap << "\n";);
   }
 }
 
@@ -751,7 +685,6 @@ struct Expr {
   void dump() const { print(dbgs()); }
 
   bool matches(Value *V) {
-    errs() << "Match V: " << *V << "\n";
     if (Val && V == Val) {
       assert(Kind == EK_VALUE || Kind == EK_INSTRUCTION || Kind == EK_ARGUMENT);
       PossibleMatches.insert(Val);
@@ -788,7 +721,6 @@ struct Expr {
   }
 
   bool matches(Instruction *I) {
-    errs() << "Match I: " << *I << "\n";
     if (Kind == EK_CONSTANT || Kind == EK_ARGUMENT)
       return false;
     if (Val && I == Val) {
@@ -844,10 +776,6 @@ struct Expr {
     // TODO
     for (unsigned OpIdx = 0; OpIdx < NumRequiredOperands; OpIdx++)
       if (!OperandMatches[OpIdx].count(OpIdx)) {
-        I->dump();
-        errs() << "Fail: " << OpIdx <<"\n";
-        for (auto &It : OperandMatches[OpIdx])
-          errs() << " - " << It << "\n";
         return false;
       }
 
@@ -857,78 +785,9 @@ struct Expr {
 };
 
 void PolyhedralAccessInfo::detectKnownComputations(Function &F) {
-
-#if 0
-  PACCSummary *PS = getAccessSummary(F, PACCSummary::SSK_COMPLETE);
-
-  for (auto &It : *PS) {
-    int i = 0;
-    errs() << "BP: " << *It.first << "\n";
-    PACCSummary::ArrayInfo &AI = *It.second;
-    AI.print(errs());
-    errs() << "i: " << i++ << "\n";
-    if (AI.DimensionSizes.size() != 1)
-      continue;
-    errs() << "i: " << i++ << "\n";
-    if (AI.MayWriteMap || AI.MayReadMap)
-      continue;
-    errs() << "i: " << i++ << "\n";
-    if (!AI.MustWriteMap || !AI.MustReadMap)
-      continue;
-    errs() << "i: " << i++ << "\n";
-    if (AI.MustWriteMap.isEmpty() || AI.MustReadMap.isEmpty())
-      continue;
-    errs() << "i: " << i++ << "\n";
-    if (!AI.MustWriteMap.isEqual(AI.MustReadMap))
-      continue;
-    errs() << "i: " << i++ << "\n";
-    if (AI.Accesses.size() != 2)
-      continue;
-    errs() << "i: " << i++ << " [6]\n";
-    const PACC *PA0 = AI.Accesses[0];
-    const PACC *PA1 = AI.Accesses[1];
-    int Idx = PA0->isRead() ? 0 : 1;
-    if (!isa<LoadInst>(AI.Accesses[Idx]->getPEXP()->getValue()) ||
-        !isa<StoreInst>(AI.Accesses[1-Idx]->getPEXP()->getValue()))
-      continue;
-    errs() << "i: " << i++ << " [7]\n";
-    StoreInst *SI = cast<StoreInst>(AI.Accesses[1-Idx]->getPEXP()->getValue());
-    LoadInst *LI = cast<LoadInst>(AI.Accesses[Idx]->getPEXP()->getValue());
-
-    Expr *Alpha = new Expr(Expr::EK_VALUE, nullptr);
-    Expr *Beta = new Expr(Expr::EK_VALUE, nullptr);
-    Expr *C = new Expr(Expr::EK_INSTRUCTION, nullptr);
-    Expr *LIExpr = new Expr(Expr::EK_INSTRUCTION, LI);
-    Expr *MulAlphaC = new Expr(Expr::EK_INSTRUCTION, {C, Alpha},
-                               {Instruction::Mul, Instruction::FMul}, true);
-    Expr *MulBetaLI = new Expr(Expr::EK_INSTRUCTION, {LIExpr, Beta},
-                               {Instruction::Mul, Instruction::FMul}, true);
-    Expr *E = new Expr(Expr::EK_INSTRUCTION, {MulAlphaC, MulBetaLI},
-                       {Instruction::Add, Instruction::FAdd}, true);
-    errs() << "Match: " << E->matches(SI->getValueOperand()) << "\n";
-    auto P = [&](std::string S, Expr *E) {
-      errs() << S << ":";
-      for (auto *PM : E->PossibleMatches)
-        errs() << " " << *PM << ",";
-      if (E->PossibleMatches.empty())
-        errs() << " None\n";
-      else
-        errs() << "\n";
-    };
-    P("E", E);
-    P("MulBetaLI", MulBetaLI);
-    P("MulAlphaC", MulAlphaC);
-    P("LIExpr", LIExpr);
-    P("C", C);
-    P("Beta", Beta);
-    P("Alpha", Alpha);
-    delete E;
-  }
-#endif
 }
 
 void PolyhedralAccessInfo::extractComputations(Function &F) {
-  errs() << "\n\nEXTRACT COMPUTATIONS:\n\n";
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   for (BasicBlock &BB : F) {
@@ -1063,30 +922,11 @@ void PolyhedralAccessInfo::extractComputations(Function &F) {
                           [](Instruction *) { return true; }, nullptr);
       PS->finalize(PI, PACCs, DL);
 
-      errs() << "\nFound computation:\n\t";
-      E->dump();
-      errs() << "\nAccesses:\n";
       for (auto &ArrayInfoIt : PS->ArrayInfoMap) {
         for (auto &MultiDimAccessIt : ArrayInfoIt.second->AccessMultiDimMap) {
           Value *AccessInst = MultiDimAccessIt.first->getPEXP()->getValue();
-          if (isa<StoreInst>(AccessInst))
-            errs() << "\t- "
-                   << std::string(" ",MaxLoadName - 4) << "ROOT:\t"
-                   << MultiDimAccessIt.second << "\n";
-          else
-            errs() << "\t- "
-                   << std::string(" ",
-                                  MaxLoadName - AccessInst->getName().size())
-                   << AccessInst->getName() << ":\t" << MultiDimAccessIt.second
-                   << "\n";
         }
       }
-      errs() << "Recurrences:\n";
-      for (std::pair<PHINode *, const PEXP *> &RecurrenceIt : Recurrences) {
-        errs() << "\t- " << RecurrenceIt.first->getName() << ":\t"
-               << RecurrenceIt.second << "\n";
-      }
-      errs() << "\n";
       //delete E;
       delete PS;
     }

@@ -165,14 +165,10 @@ PVSet PVSet::createParameterRange(const PVId &Id, int LowerBound,
   PVSet ParamRange = universe(Id);
   ParamRange.Obj = isl_set_add_dims(ParamRange.Obj, isl_dim_param, 1);
   ParamRange.Obj = isl_set_set_dim_id(ParamRange.Obj, isl_dim_param, 0, Id);
-  //errs() << "LB: " << LowerBound << " UB: " << UpperBound << "\n";
-  //errs() << ParamRange << "\n";
   ParamRange.Obj =
       isl_set_lower_bound_si(ParamRange.Obj, isl_dim_param, 0, LowerBound);
-  //errs() << ParamRange << "\n";
   ParamRange.Obj =
       isl_set_upper_bound_si(ParamRange.Obj, isl_dim_param, 0, UpperBound);
-  //errs() << ParamRange << "\n";
   return ParamRange;
 }
 

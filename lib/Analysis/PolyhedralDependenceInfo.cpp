@@ -62,11 +62,8 @@ PolyhedralDependenceInfo::PolyhedralDependenceInfo(PolyhedralAccessInfo &PAI, Lo
 PolyhedralDependenceInfo::~PolyhedralDependenceInfo() { releaseMemory(); }
 
 bool PolyhedralDependenceInfo::isVectorizableLoop(Loop &L) {
-  errs() << "CHECK L:";
-  L.dump();
 
   if (L.begin() != L.end()) {
-    DEBUG(dbgs() << "PDI: Loop is not innermost. Not vectorizable!\n");
     return false;
   }
 
@@ -100,14 +97,10 @@ bool PolyhedralDependenceInfo::isVectorizableLoop(Loop &L) {
 
     PVSet ConflictSet = ReadWriteMap.getParameterSet();
     ConflictSet.dropUnusedParameters();
-    errs() << ConflictSet <<"\n";
-    DEBUG(dbgs() << "Conflicting accesses for " << *ArrayInfoMapIt.getFirst()
-                 << "\n\t => " << ReadWriteMap << "\n");
     if (!ConflictSet.hasLowerBoundForParam(OffsetId))
       return false;
 
     ConflictSet.minForParam(OffsetId);
-    errs() << ConflictSet <<"\n";
 
     return false;
   }
@@ -124,7 +117,6 @@ void PolyhedralDependenceInfo::print(raw_ostream &OS) const {
   for (Loop *L : Loops) {
     bool Vec =
         const_cast<PolyhedralDependenceInfo *>(this)->isVectorizableLoop(*L);
-    errs() << "L: " << L->getName() << " Vec: " << Vec << "\n";
   }
 }
 
