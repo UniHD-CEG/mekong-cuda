@@ -40,21 +40,6 @@ PolyhedralValueInfoCache::~PolyhedralValueInfoCache() {
 }
 
 std::string PolyhedralValueInfoCache::getParameterNameForValue(Value &V) {
-  if (IntrinsicInst *Intr = dyn_cast<IntrinsicInst>(&V)) {
-    switch (Intr->getIntrinsicID()) {
-    case Intrinsic::nvvm_read_ptx_sreg_tid_x:
-      return "nvvm_tid_x";
-    case Intrinsic::nvvm_read_ptx_sreg_tid_y:
-      return "nvvm_tid_y";
-    case Intrinsic::nvvm_read_ptx_sreg_tid_z:
-      return "nvvm_tid_z";
-    case Intrinsic::nvvm_read_ptx_sreg_tid_w:
-      return "nvvm_tid_w";
-    default:
-      break;
-    }
-  }
-
   if (V.hasName())
     return V.getName().str();
   return "p" + std::to_string(ParameterMap.size());

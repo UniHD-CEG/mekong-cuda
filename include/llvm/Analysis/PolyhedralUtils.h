@@ -67,6 +67,27 @@ struct NVVMRewriter : public PVRewriter<PVType> {
     return NVVMDIM_NONE;
   }
 
+  std::string getCudaIntrinsicName(Value *V) {
+    auto *Intr = dyn_cast<IntrinsicInst>(V);
+    if (!Intr)
+      return "";
+    switch (Intr->getIntrinsicID()) {
+      case Intrinsic::nvvm_read_ptx_sreg_tid_x: return "nvvm_tid_x";
+      case Intrinsic::nvvm_read_ptx_sreg_tid_y: return "nvvm_tid_y";
+      case Intrinsic::nvvm_read_ptx_sreg_tid_z: return "nvvm_tid_z";
+      case Intrinsic::nvvm_read_ptx_sreg_ctaid_x: return "nvvm_ctaid_x";
+      case Intrinsic::nvvm_read_ptx_sreg_ctaid_y: return "nvvm_ctaid_y";
+      case Intrinsic::nvvm_read_ptx_sreg_ctaid_z: return "nvvm_ctaid_z";
+      case Intrinsic::nvvm_read_ptx_sreg_ntid_x: return "nvvm_ntid_x";
+      case Intrinsic::nvvm_read_ptx_sreg_ntid_y: return "nvvm_ntid_y";
+      case Intrinsic::nvvm_read_ptx_sreg_ntid_z: return "nvvm_ntid_z";
+      case Intrinsic::nvvm_read_ptx_sreg_nctaid_x: return "nvvm_nctaid_x";
+      case Intrinsic::nvvm_read_ptx_sreg_nctaid_y: return "nvvm_nctaid_y";
+      case Intrinsic::nvvm_read_ptx_sreg_nctaid_z: return "nvvm_nctaid_z";
+    }
+    return "";
+  }
+
   virtual void rewrite(PVType &Obj) override {
     SmallVector<PVId, 4> ThreadIdCallsPerDim[NumNVVMDims];
 
@@ -110,6 +131,16 @@ struct NVVMRewriter : public PVRewriter<PVType> {
       BlockOffset[Dim] =
           PVId(Id, "nvvm_block_offset_" + NVVMDimNames[Dim], IdValue);
       Obj.setParameter(d, BlockOffset[Dim]);
+    }
+
+    // must run after blockOffset resolution
+    for (unsigned d = 0, e = Obj.getNumParameters(); d < e; ++d) {
+      const PVId &Id = Obj.getParameter(d);
+      Value *IdValue = Id.getPayloadAs<Value *>();
+      std::string name = getCudaIntrinsicName(IdValue);
+      if (name != "") {
+        Obj.setParameter(d, PVId(Id, name, IdValue));
+      }
     }
 
     if (!UseGlobalIdx)
