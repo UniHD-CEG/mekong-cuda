@@ -275,6 +275,31 @@ function bind()
   end
 end
 
+function has_flag(cmd, pat)
+  for _, piece in ipairs(cmd) do
+    if piece:match(pat) then
+      return true
+    end
+  end
+  return false
+end
+
+function translate_common_c(binding, cmd)
+  cmd = append(cmd, args["g"])
+  cmd = append(cmd, args["std"])
+  for _, include in ipairs(args["I"]) do
+    cmd = append(cmd, "-I" .. include)
+  end
+  cmd = append(cmd, "-I" .. MERTINC)
+  for _, define in ipairs(args["D"]) do
+    cmd = append(cmd, "-D" .. define)
+  end
+  if not has_flag(cmd, '^-O%d*$') then
+    cmd = append(cmd, "-O"..args["O"])
+  end
+  return cmd
+end
+
 function translate()
   for idx, binding in ipairs(bindings) do
     local cmd = nil
@@ -283,22 +308,16 @@ function translate()
     elseif binding[1] == "analyze" then
       cmd = { CLANGXX }
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
-      cmd = append(cmd, "-O1", "--cuda-device-only", "-c", "-mllvm", "-mekong-pre")
-      cmd = append(cmd, args["g"])
-      cmd = append(cmd, args["std"])
+      cmd = append(cmd, "-O1", "--cuda-device-only", "-mllvm", "-mekong-pre")
       cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[3])
+
       cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
       if args["cuda_path"] ~= nil then
         cmd = append(cmd, "--cuda-path=" .. args["cuda_path"])
       end
-      for _, include in ipairs(args["I"]) do
-        cmd = append(cmd, "-I" .. include)
-      end
-      for _, define in ipairs(args["D"]) do
-        cmd = append(cmd, "-D" .. define)
-      end
+      cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
-      cmd = append(cmd, "-o", "/dev/null")
+      cmd = append(cmd, "-c", "-o", "/dev/null")
 
     elseif binding[1] == "rewrite" then
       cmd = { MEKONGRW }
@@ -313,57 +332,30 @@ function translate()
         cmd = append(cmd, binding["include"])
       end
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
+      cmd = append(cmd, "-x", "cuda", "-mllvm", "-mekong")
       cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[2][2])
-      cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
 
-      cmd = append(cmd, "-x", "cuda")
-      cmd = append(cmd, "-O"..args["O"], "-c", "-mllvm", "-mekong")
-      cmd = append(cmd, args["g"])
-      cmd = append(cmd, args["std"])
+      cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
       if args["cuda_path"] ~= nil then
         cmd = append(cmd, "--cuda-path=" .. args["cuda_path"])
       end
-      for _, include in ipairs(args["I"]) do
-        cmd = append(cmd, "-I" .. include)
-      end
-      cmd = append(cmd, "-I" .. MERTINC)
-      for _, define in ipairs(args["D"]) do
-        cmd = append(cmd, "-D" .. define)
-      end
+      cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
-      cmd = append(cmd, "-o", binding[3])
+      cmd = append(cmd, "-c", "-o", binding[3])
 
     elseif binding[1] == "compile-c" then
       cmd = { CLANG }
       cmd = append(cmd, "-x", "c")
-      cmd = append(cmd, "-O"..args["O"], "-c")
-      cmd = append(cmd, args["g"])
-      cmd = append(cmd, args["std"])
-      for _, include in ipairs(args["I"]) do
-        cmd = append(cmd, "-I" .. include)
-      end
-      cmd = append(cmd, "-I" .. MERTINC)
-      for _, define in ipairs(args["D"]) do
-        cmd = append(cmd, "-D" .. define)
-      end
+      cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
-      cmd = append(cmd, "-o", binding[3])
+      cmd = append(cmd, "-c", "-o", binding[3])
 
     elseif binding[1] == "compile-c++" then
       cmd = { CLANGXX }
       cmd = append(cmd, "-x", "c++")
-      cmd = append(cmd, "-O"..args["O"], "-c")
-      cmd = append(cmd, args["g"])
-      cmd = append(cmd, args["std"])
-      for _, include in ipairs(args["I"]) do
-        cmd = append(cmd, "-I" .. include)
-      end
-      cmd = append(cmd, "-I" .. MERTINC)
-      for _, define in ipairs(args["D"]) do
-        cmd = append(cmd, "-D" .. define)
-      end
+      cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
-      cmd = append(cmd, "-o", binding[3])
+      cmd = append(cmd, "-c", "-o", binding[3])
 
     elseif binding[1] == "link" then
       cmd = { CLANGXX }
@@ -390,27 +382,20 @@ function translate()
       cmds[#cmds+1] = cmd
     end
   end
-
-  if args["###"] then
-    for _, cmd in ipairs(cmds) do
-      printf("# %s", table.concat(cmd, " "))
-    end
-  end
 end
 
 function execute()
-  if args["###"] then
-    return
-  end
   for _, cmd in ipairs(cmds) do
     cmd_str = table.concat(cmd, " ")
-    if args["v"] then
+    if args["v"] or args["###"] then
       print(cmd_str)
     end
-    if os.execute(cmd_str) ~= 0 then
-      print("error encountered, compilation aborted")
-      errcode = 1
-      break
+    if not args["###"] then
+      if os.execute(cmd_str) ~= 0 then
+        print("error encountered, compilation aborted")
+        errcode = 1
+        break
+      end
     end
   end
 end
