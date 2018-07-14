@@ -23,6 +23,7 @@ namespace mekong {
   llvm::Pass *createMeCodegen();
   llvm::Pass *createMeCodegen(llvm::StringRef File);
   llvm::Pass *createMeKernelSubgrid();
+  llvm::Pass *createMeHostReplaceCuda();
 }
 
 #endif

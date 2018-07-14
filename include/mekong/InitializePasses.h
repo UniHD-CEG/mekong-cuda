@@ -13,6 +13,7 @@ void initializeMeKernelAnalysisWrapperPass(PassRegistry&);
 void initializeMeKernelAnalysisPass(PassRegistry&);
 void initializeMeCodegenPass(PassRegistry&);
 void initializeMeKernelSubgridPass(PassRegistry&);
+void initializeMeHostReplaceCudaPass(PassRegistry&);
 
 } // namespace llvm
 

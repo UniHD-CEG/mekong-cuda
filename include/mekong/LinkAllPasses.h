@@ -19,6 +19,7 @@ struct MekongForcePassLinking {
     mekong::createMeKernelAnalysisWrapper("");
     mekong::createMeCodegen();
     mekong::createMeKernelSubgrid();
+    mekong::createMeHostReplaceCuda();
   }
 } MekongForcePassLinking; // Force link by creating a global definition.
 } // namespace

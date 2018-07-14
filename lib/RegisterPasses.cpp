@@ -65,6 +65,7 @@ void initializeMekongPasses(llvm::PassRegistry &Registry) {
   initializeMeKernelAnalysisWrapperPass(Registry);
   initializeMeCodegenPass(Registry);
   initializeMeKernelSubgridPass(Registry);
+  initializeMeHostReplaceCudaPass(Registry);
 }
 
 }

@@ -17,6 +17,7 @@ add_llvm_loadable_module(LLVMMekong
   RegisterPasses.cpp
   MeModel.cpp
   MeKernelAnalysis.cpp
+  MeReplaceCuda.cpp
   MeCodegen.cpp
   MeKernelSubgrid.cpp
   )
