@@ -29,11 +29,12 @@ namespace mekong {
 // These passes should profit from all standard optimization
 static void registerEarlyMekongPasses(const llvm::PassManagerBuilder &Builder,
     llvm::legacy::PassManagerBase &PM) {
+  if (MekongPreEnabled) {
+  }
   if (MekongEnabled) {
     PM.add(mekong::createMeCodegen(MekongModel));
+    PM.add(mekong::createMeHostReplaceCuda());
     PM.add(mekong::createMeKernelSubgrid());
-  }
-  if (MekongPreEnabled) {
   }
 }
 

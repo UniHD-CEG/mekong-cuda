@@ -1,5 +1,4 @@
-file(COPY mekongrw
-  DESTINATION ${LLVM_BINARY_DIR}/bin)
+configure_file(mekongrw ${LLVM_BINARY_DIR}/bin/mekongrw @ONLY)
 install(FILES ${LLVM_BINARY_DIR}/bin/mekongrw
   DESTINATION bin
   PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ

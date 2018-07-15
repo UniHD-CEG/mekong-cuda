@@ -47,17 +47,6 @@ end
 -- pattern matchers / substitutors
 -------------------------------------------------------------------------------
 
-local function substitute_function(str, from, to)
-  -- match function name + maybe whitespace + balanced parentheses (captured)
-  local pat = "%f[_a-zA-Z0-9]" .. from .. "%s*(%b())";
-  -- replace with new name + balanced parentheses with content
-  str, num = string.gsub(str, pat, function(parens)
-    return to .. parens
-  end)
-  --logf("%d function substitutions (%s)", num, from)
-  return str
-end
-
 local function substitute_kernel_launch(str, fn)
   -- syntax: $IDENTIFIER \s* <<< $CONFIG >>> \s* ( $PARAMETERS )
   local PATTERN = "(".."([_a-zA-Z][_a-zA-Z0-9]*)" .. -- start + identifier
@@ -282,20 +271,6 @@ end
 -- Substitutions
 -------------------------------------------------------------------------------
 
-local subs = {
-  {"cudaMalloc",            "__meMalloc"},
-  {"cudaFree",              "__meFree"},
-  {"cudaMemcpy",            "__meMemcpy"},
-  {"cudaMemcpyAsync",       "__meMemcpyAsync"},
-  {"cudaGetDeviceCount",    "__meGetDeviceCount"},
-  {"cudaDeviceSynchronize", "__meDeviceSynchronize"}
-}
-for _, pair in ipairs(subs) do
-  contents = substitute_function(contents, pair[1], pair[2])
-end
-
-
--------------------------------------------------------------------------------
 contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
   local kernel = kernels[name]
 
@@ -325,7 +300,7 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
 
   }
 
-  -- unsplittable
+  -- splittable
   if kernel['partitioning'] ~= 'none' then
 
     return string.template([[
@@ -405,7 +380,7 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
   // -------- {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
     ]], env)
 
-  -- splittable
+  -- unsplittable
   else 
 
     logf("unsplittable kernel %s", name)
