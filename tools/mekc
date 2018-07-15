@@ -327,13 +327,12 @@ function translate()
 
     elseif binding[1] == "compile" then
       cmd = { CLANGXX }
+      cmd = append(cmd, "-x", "cuda")
       if binding["include"] then
-        cmd = append(cmd, "-iquote")
-        cmd = append(cmd, binding["include"])
+        cmd = append(cmd, "-iquote", binding["include"])
       end
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
-      cmd = append(cmd, "-x", "cuda", "-mllvm", "-mekong")
-      cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[2][2])
+      cmd = append(cmd, "-mllvm", "-mekong", "-mllvm", "-mekong-model=".. binding[2][2])
 
       cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
       if args["cuda_path"] ~= nil then
@@ -346,6 +345,8 @@ function translate()
     elseif binding[1] == "compile-c" then
       cmd = { CLANG }
       cmd = append(cmd, "-x", "c")
+      cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
+      cmd = append(cmd, "-mllvm", "-mekong")
       cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
       cmd = append(cmd, "-c", "-o", binding[3])
@@ -353,6 +354,8 @@ function translate()
     elseif binding[1] == "compile-c++" then
       cmd = { CLANGXX }
       cmd = append(cmd, "-x", "c++")
+      cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
+      cmd = append(cmd, "-mllvm", "-mekong")
       cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
       cmd = append(cmd, "-c", "-o", binding[3])
