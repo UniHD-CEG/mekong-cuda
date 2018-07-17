@@ -27,8 +27,7 @@ local app = (arg[0]):match(".-([^%/]+)$")
 local script_dir = (arg[0]):match("(.-)[^%/]+$")
 local script_dir = script_dir:match("(.-)/?$")
 package.path = script_dir .. "/../lib/lua/?.lua"
-local argparse = require('argparse')
-local pprint = require('pprint')
+local cargs = require('cargs')
 
 CLANGXX = script_dir .. "/clang++"
 CLANG = script_dir .. "/clang"
@@ -51,12 +50,13 @@ local steps = {
   link = true,
 }
 
-local args = nil
+local arguments = nil
+local opts = nil
 local os_name = nil
+
 local actions = {}
 local bindings = {}
 local cmds = {}
-local errcode = 0
 
 local temps = {}
 
@@ -64,58 +64,77 @@ local temps = {}
 -- steps
 
 function parse()
-  local parser = argparse("mekc", "The mekong compiler.")
-  parser:argument("input", "An input file."):args("+")
-  local E = parser:flag("-E", "Only run preprocess step."):default(false)
-  local A = parser:flag("-A", "Only run preprocess and analysis steps."):default(false)
-  local R = parser:flag("-R", "Only run preprocess, analysis, and rewrite steps."):default(false)
-  local c = parser:flag("-c", "Only run preprocess, analysis, rewrite, compile and assemble steps."):default(false)
-  parser:mutex(E, A, R, c)
+  local app = cargs.App:new("mekc", "The mekong compiler.", "<inputs>")
 
-  parser:flag("-g", "debug info."):default(nil)
+  app:add_option('flag', 'once', {'-'}, 'E', nil, 'Stop after preprocessing.')
+  app:add_option('flag', 'once', {'-'}, 'A', nil, 'Stop after analysis.')
+  app:add_option('flag', 'once', {'-'}, 'R', nil, 'Stop after rewriting.')
+  app:add_option('flag', 'once', {'-'}, 'c', nil, 'Stop after compile and assembly.')
 
-  parser:option("-I", "Search directory for headers."):count("*")
-  parser:option("-O", "Optimization level."):default(2)
-  parser:option("-D", "Define macro."):count("*")
-  parser:option("--cuda-gpu-arch", "GPU target architecture."):count("?"):default(CUDAARCH)
-  parser:option("--cuda-path", "CUDA SDK path."):count("?"):default(CUDAPATH)
-  parser:option("-std", "c++ standard du use") -- dummy
+  app:add_option('joined_or_separate', 'once', {'-'}, 'o', nil, 'Write results to <file>.', '<file>')
 
-  parser:option("-L", "Search directory for libraries."):count("*")
-  parser:option("-l", "Link library."):count("*")
+  app:add_option('flag', 'last', {'-'}, 'g', nil, 'Include debug info.')
 
-  parser:flag("--ccc-print-enabled", "Print enabled phases."):default(false)
-  parser:flag("--ccc-print-phases", "Print compilation actions."):default(false)
-  parser:flag("--ccc-print-bindings", "Print compilation bindings."):default(false)
-  parser:flag("-###", "Print (but do not execute) commands to run.") -- dymmy
-  parser:flag("-v", "Print commands to run."):default(false)
+  app:add_option('joined', 'last', {'-'}, 'O', nil, 'Optimization level.')
+  app:add_option('joinsep', 'last', {'-'}, 'D', nil, 'Define Macro.')
+  app:add_option('joined', 'once', {'-', '--'}, 'std=', 'std', 'Language standard.', '<version>')
 
-  parser:option("-o", "Output file."):count("?")
+  app:add_option('joinsep', 'list', {'-'}, 'I', nil, 'Add directory to include search path.', '<dir>')
+  app:add_option('joinsep', 'list', {'-'}, 'L', nil, 'Add directory to library search path.', '<dir>')
+  app:add_option('joinsep', 'list', {'-'}, 'l', nil, 'Link .', '<library>')
 
-  local cmd_args = rawget(_G, "arg") or {}
-  weird_args = {}
-  weird_args["std"], cmd_args = parse_pattern("^%-std=.*$", cmd_args)
-  weird_args["###"], cmd_args = parse_pattern("^%-###$", cmd_args)
+  app:add_option('joined', 'once', {'--'}, 'cuda-gpu-arch=', 'cuda-gpu-arch',
+    'GPU target architecture.', '<arch>')
+  app:add_option('joined', 'once', {'--'}, 'cuda-path=', 'cuda-path',
+    'CUDA SDK path.', '<dir>')
 
-  args = parser:parse(cmd_args)
-  for k, v in pairs(weird_args) do
-    args[k] = v
-  end
-  if args["g"] then args["g"] = "-g" end
+  app:add_option('flag', 'last', {'-', '--'}, 'ccc-print-phases', nil, "Print phases.")
+  app:add_option('flag', 'last', {'-', '--'}, 'ccc-print-actions', nil, "Print actions.")
+  app:add_option('flag', 'last', {'-', '--'}, 'ccc-print-bindings', nil, "Print bindings.")
+  app:add_option('flag', 'last', {'-', '--'}, '###', nil, "Print (dont' execute) commands to run.")
+  app:add_option('flag', 'last', {'-', '--'}, 'v', nil, "Print commands to run.")
 
+  -- parse arguments, gather OS info
+  opts, arguments = app:parse()
   os_name = io.popen('uname -s','r'):read('*l')
-
-  if args["E"] then
-    printf("-E currently not supported")
+  if #arguments == 0 then
+    print('no input files')
     os.exit(1)
   end
 
-  steps["analyze"]  = not args["E"]
-  steps["rewrite"]  = not args["E"] and not args["A"]
-  steps["compile"]  = not args["E"] and not args["A"] and not args["R"]
-  steps["link"]     = not args["E"] and not args["A"] and not args["R"] and not args["c"]
+  -- defaults
+  opts['cuda-path'] = opts['cuda-path'] or CUDAPATH
+  opts['cuda-gpu-arch'] = opts['cuda-gpu-arch'] or CUDAARCH
+  opts['O'] = opts['O'] or '2'
 
-  if args["ccc_print_enabled"] then
+  opts['I'] = opts['I'] or {}
+  opts['L'] = opts['L'] or {}
+  opts['l'] = opts['l'] or {}
+  opts['D'] = opts['D'] or {}
+
+  -- convenience translations
+  opts['g'] = opts['g'] and '-g'
+  opts['std'] = opts['std'] and ('-std=' .. opts['std'])
+
+  -- mutex constraints
+  local actions = 0
+  if opts['E'] then actions = actions + 1 end
+  if opts['A'] then actions = actions + 1 end
+  if opts['R'] then actions = actions + 1 end
+  if opts['c'] then actions = actions + 1 end
+  if actions > 1 then
+    print('error: only one allowed of E, A, R, c')
+    os.exit(1)
+  end
+end
+
+function phases()
+  steps["analyze"]  = not opts["E"]
+  steps["rewrite"]  = not opts["E"] and not opts["A"]
+  steps["compile"]  = not opts["E"] and not opts["A"] and not opts["R"]
+  steps["link"]     = not opts["E"] and not opts["A"] and not opts["R"] and not opts["c"]
+
+  if opts["ccc-print-phases"] then
     print("1: preprocess")
     local i = 2
     for _, phase in ipairs{"analyze", "rewrite", "compile", "link"} do
@@ -123,7 +142,6 @@ function parse()
       i = i + 1
     end
   end
-
 end
 
 function pipeline()
@@ -131,10 +149,9 @@ function pipeline()
   -- Such an explicitly passed yaml file then disables analysis for the next
   -- cuda file and results in using the specified yaml file instead
   local yamls = {} -- yaml stack, enables behaviour above
-
   local objs = {}
 
-  for _, input in pairs(args.input) do
+  for _, input in pairs(arguments) do
     repeat -- lua hack for continue (breaks now act as a continue)
       local ftype = guess_type(input)
 
@@ -187,7 +204,7 @@ function pipeline()
       end
     until true
   end
-  if #yamls > 0 and not args["A"] then
+  if #yamls > 0 and not opts["A"] then
     print("warning: there were unused yaml files")
   end
 
@@ -195,7 +212,7 @@ function pipeline()
     add_action("link", objs)
   end
 
-  if args["ccc_print_phases"] then
+  if opts["ccc-print-actions"] then
     for num, action in ipairs(actions) do
       printf("%d: %s, [%s], %s", num, action[1], table.concat(action[2], ", "), action[3] or "wat")
     end
@@ -223,8 +240,8 @@ function bind()
     local include = nil
 
     -- if last step and user chose an output file, use that one.
-    if idx == #actions and args["o"] ~= nil then
-      out = args["o"]
+    if idx == #actions and opts["o"] ~= nil then
+      out = opts["o"]
     end
 
     -- only set 'out' to temporary if not already set above
@@ -268,7 +285,7 @@ function bind()
     bindings[idx] = {action[1], inputs, out, include = include}
   end
 
-  if args["ccc_print_bindings"] then
+  if opts["ccc-print-bindings"] then
     for idx, binding in ipairs(bindings) do
       printf("%d: %s : [%s] -> %s", idx, binding[1], table.concat(binding[2], ", "), binding[3])
     end
@@ -285,17 +302,17 @@ function has_flag(cmd, pat)
 end
 
 function translate_common_c(binding, cmd)
-  cmd = append(cmd, args["g"])
-  cmd = append(cmd, args["std"])
-  for _, include in ipairs(args["I"]) do
+  cmd = append(cmd, opts["g"])
+  cmd = append(cmd, opts["std"])
+  for _, include in ipairs(opts["I"]) do
     cmd = append(cmd, "-I" .. include)
   end
   cmd = append(cmd, "-I" .. MERTINC)
-  for _, define in ipairs(args["D"]) do
+  for _, define in ipairs(opts["D"]) do
     cmd = append(cmd, "-D" .. define)
   end
   if not has_flag(cmd, '^-O%d*$') then
-    cmd = append(cmd, "-O"..args["O"])
+    cmd = append(cmd, "-O"..opts["O"])
   end
   return cmd
 end
@@ -311,9 +328,9 @@ function translate()
       cmd = append(cmd, "-O1", "--cuda-device-only", "-mllvm", "-mekong-pre")
       cmd = append(cmd, "-mllvm", "-mekong-model=".. binding[3])
 
-      cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
-      if args["cuda_path"] ~= nil then
-        cmd = append(cmd, "--cuda-path=" .. args["cuda_path"])
+      cmd = append(cmd, "--cuda-gpu-arch=" .. opts["cuda-gpu-arch"])
+      if opts["cuda-path"] ~= nil then
+        cmd = append(cmd, "--cuda-path=" .. args["cuda-path"])
       end
       cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
@@ -334,9 +351,9 @@ function translate()
       cmd = append(cmd, "-fplugin=" .. LIBMEKONG)
       cmd = append(cmd, "-mllvm", "-mekong", "-mllvm", "-mekong-model=".. binding[2][2])
 
-      cmd = append(cmd, "--cuda-gpu-arch=" .. args["cuda_gpu_arch"])
-      if args["cuda_path"] ~= nil then
-        cmd = append(cmd, "--cuda-path=" .. args["cuda_path"])
+      cmd = append(cmd, "--cuda-gpu-arch=" .. opts["cuda-gpu-arch"])
+      if opts["cuda-path"] ~= nil then
+        cmd = append(cmd, "--cuda-path=" .. opts["cuda-path"])
       end
       cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
@@ -362,12 +379,12 @@ function translate()
 
     elseif binding[1] == "link" then
       cmd = { CLANGXX }
-      cmd = append(cmd, "-O"..args["O"])
-      cmd = append(cmd, args["g"])
-      for _, libdir in ipairs(args["L"]) do
+      cmd = append(cmd, "-O"..opts["O"])
+      cmd = append(cmd, opts["g"])
+      for _, libdir in ipairs(opts["L"]) do
         cmd = append(cmd, "-L" .. libdir)
       end
-      for _, library in ipairs(args["l"]) do
+      for _, library in ipairs(opts["l"]) do
         cmd = append(cmd, "-l" .. library)
       end
       for _, input in ipairs(binding[2]) do
@@ -390,14 +407,13 @@ end
 function execute()
   for _, cmd in ipairs(cmds) do
     cmd_str = table.concat(cmd, " ")
-    if args["v"] or args["###"] then
+    if opts["v"] or opts["###"] then
       print(cmd_str)
     end
-    if not args["###"] then
+    if not opts["###"] then
       if os.execute(cmd_str) ~= 0 then
         print("error encountered, compilation aborted")
-        errcode = 1
-        break
+        os.exit(1)
       end
     end
   end
@@ -405,7 +421,7 @@ end
 
 function cleanup()
   for temp, _ in pairs(temps) do
-    if args["###"] then
+    if opts["###"] then
       print("removing temporary " .. temp)
     else
       os.remove(temp)
@@ -415,27 +431,6 @@ end
 
 --------------------------------------------------------------------------------
 -- utility functions
-
--- matches the pattern against all args, keeping last match.
--- argument that did not match are copied and returned as the new args
--- returns: last match, modified args
-function parse_pattern(pattern, args)
-  local i = 1
-  local result = nil
-  local newargs = {}
-  for _, arg in ipairs(args) do
-    if arg == "--" then
-      break
-    end
-    local m = arg:match(pattern)
-    if m then
-      result = m
-    else
-      newargs[#newargs+1] = arg
-    end
-  end
-  return result, newargs
-end
 
 function printf(fmt, ...)
   print(string.format(fmt, ...))
@@ -548,9 +543,10 @@ end
 -- "main" function
 
 parse()
+phases()
 pipeline()
 bind()
 translate()
 execute()
 cleanup()
-os.exit(errcode)
+os.exit(0)

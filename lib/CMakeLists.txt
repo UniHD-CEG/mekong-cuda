@@ -84,11 +84,9 @@ install(FILES ${LLVM_BINARY_DIR}/include/mekong/me-runtime.h
 
 file(COPY
   lua/yaml.lua
-  lua/argparse.lua
-  lua/pprint.lua
+  lua/cargs.lua
   DESTINATION ${LLVM_BINARY_DIR}/lib/lua)
 install(FILES
   ${LLVM_BINARY_DIR}/lib/lua/yaml.lua
-  ${LLVM_BINARY_DIR}/lib/lua/argparse.lua
-  ${LLVM_BINARY_DIR}/lib/lua/pprint.lua
+  ${LLVM_BINARY_DIR}/lib/lua/cargs.lua
   DESTINATION lib/lua)
