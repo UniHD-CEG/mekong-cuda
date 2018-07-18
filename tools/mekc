@@ -109,8 +109,7 @@ function parse()
   -- early exit if no inputs
   os_name = io.popen('uname -s','r'):read('*l')
   if #arguments == 0 then
-    print('no input files')
-    os.exit(1)
+    error('no input files')
   end
 
   -- defaults
@@ -134,8 +133,7 @@ function parse()
   if opts['R'] then actions = actions + 1 end
   if opts['c'] then actions = actions + 1 end
   if actions > 1 then
-    print('error: only one allowed of E, A, R, c')
-    os.exit(1)
+    error('error: only one allowed of E, A, R, c')
   end
 end
 
@@ -167,8 +165,7 @@ function pipeline()
       local ftype = guess_type(input)
 
       if ftype == "unknown" then
-        printf("don't know what to do with file '%s'", input)
-        os.exit(1)
+        error(string.format("don't know what to do with file '%s'", input))
       end
 
       actions[#actions+1] = {"input", {input}, ftype}
@@ -341,7 +338,7 @@ function translate()
 
       cmd = append(cmd, "--cuda-gpu-arch=" .. opts["cuda-gpu-arch"])
       if opts["cuda-path"] ~= nil then
-        cmd = append(cmd, "--cuda-path=" .. args["cuda-path"])
+        cmd = append(cmd, "--cuda-path=" .. opts["cuda-path"])
       end
       cmd = translate_common_c(binding, cmd)
       cmd = append(cmd, binding[2][1])
@@ -423,8 +420,7 @@ function execute()
     end
     if not opts["###"] then
       if os.execute(cmd_str) ~= 0 then
-        print("error encountered, compilation aborted")
-        os.exit(1)
+        error("error encountered, compilation aborted")
       end
     end
   end
@@ -551,13 +547,19 @@ function make_temp(pattern)
 end
 
 --------------------------------------------------------------------------------
--- "main" function
 
-parse()
-phases()
-pipeline()
-bind()
-translate()
-execute()
+function main()
+  parse()
+  phases()
+  pipeline()
+  bind()
+  translate()
+  execute()
+end
+
+ok, err = pcall(main)
 cleanup()
-os.exit(0)
+if not ok then
+  print(err)
+  os.exit(1)
+end
