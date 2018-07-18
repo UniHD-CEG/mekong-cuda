@@ -14,9 +14,9 @@ exit 1
 local app = (arg[0]):match(".-([^%/]+)$")
 local script_dir = (arg[0]):match("(.-)[^%/]+$")
 package.path = script_dir .. "/../lib/lua/?.lua"
-local argparse = require('argparse')
+local cargs = require('cargs')
 local yaml = require('yaml')
-local pprint = require('pprint')
+local VERSION = '@MEKONG_VERSION@'
 
 local function printf(msg, ...)
   print(string.format(msg, ...))
@@ -221,16 +221,20 @@ local inputfiles = {}
 local kernelinfos = {}
 local output = nil
 
-local parser = argparse("mekongrw", "The mekong rewriter.")
-parser:argument("input", "An input file."):args("+")
-parser:option("--info", "Yaml analysis results."):count("*")
-parser:option("-o", "Output file."):default("-")
-local args = parser:parse()
+local app = cargs.App:new('mekongrw', 'The mekong rewriter.', '<input file>')
+app:add_option('joinsep', 'once', {'-'}, 'o', nil, 'The output file.', '<file>')
+app:add_option('joined', 'list', {'-', '--'}, 'info=', 'info', 'YAML analysis for the input file.', '<file>')
+app:add_option('flag', 'last', {'-', '--'}, 'version', nil, 'Show version and exit.')
+opts, args = app:parse()
 
-inputfiles = args["input"]
-kernelinfos = args["info"]
+if opts['version'] then
+  print('version: ' .. VERSION)
+  os.exit(0)
+end
 
-output = args["o"]
+inputfiles = args or {}
+kernelinfos = opts['info'] or {}
+output = opts['o'] or '-'
 
 if #kernelinfos < 1 then
   logf("warning: no kernel info files")

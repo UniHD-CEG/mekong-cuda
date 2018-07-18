@@ -35,6 +35,7 @@ MEKONGRW = script_dir .. "/mekongrw"
 LIBMEKONG = script_dir .. "/../lib/LLVMMekong@CMAKE_SHARED_LIBRARY_SUFFIX@"
 MERTLIB = script_dir .. "/../lib/libmekongrt.bc"
 MERTINC = script_dir .. "/../include/mekong"
+VERSION = "@MEKONG_VERSION@"
 
 CUDAARCH = "sm_30"
 CUDAPATH = nil
@@ -94,8 +95,18 @@ function parse()
   app:add_option('flag', 'last', {'-', '--'}, '###', nil, "Print (dont' execute) commands to run.")
   app:add_option('flag', 'last', {'-', '--'}, 'v', nil, "Print commands to run.")
 
+  app:add_option('flag', 'last', {'-', '--'}, 'version', nil, "Print version information and exit.")
+
   -- parse arguments, gather OS info
   opts, arguments = app:parse()
+
+  -- version + exit
+  if opts['version'] then
+    print("version: " .. VERSION)
+    os.exit(0)
+  end
+
+  -- early exit if no inputs
   os_name = io.popen('uname -s','r'):read('*l')
   if #arguments == 0 then
     print('no input files')
