@@ -193,7 +193,6 @@ bool filterMatches(const Function &F, StringRef filter) {
   return false;
 }
 
-
 /** Rename unwieldy cuda intrinsic names to something more readable. Also acts as another layer
  * of separation.
  */
@@ -221,6 +220,32 @@ __isl_give isl_map* renameCudaIntrinsics(__isl_take isl_map* map, isl_dim_type d
   }
 
   return map;
+}
+
+/** Ensure that all parameters are either cuda intrinsics or function arguments
+ */
+bool checkPVMapParameters(PVMap &M) {
+  SmallVector<PVId, 16> parameters;
+  M.getParameters(parameters);
+
+  // We check for valid parameters and exit early if the parameter is one.
+  // Reaching the end of a loop iterations then means that parameter is
+  // not a valid parameter for us.
+  for (auto parameter : parameters) {
+    auto name = parameter.str();
+    auto *value = parameter.getPayloadAs<Value*>();
+    // check if "cuda intrinsic" as understood by NVVMRewriter
+    if (name.find("nvvm_") == 0) {
+      continue;
+    }
+    // check if value is literal function argument
+    if (isa<Argument>(value)) {
+      continue;
+    }
+    //errs() << "not a parameter: " << name << "\n";
+    return false;
+  }
+  return true;
 }
 
 
@@ -497,7 +522,6 @@ struct MeKernelAnalysis : public FunctionPass {
           kernelArg.elementBitsize = DL.getTypeStoreSizeInBits(elT);
         }
 
-
         kernelArg.isReadInjective = false;
         kernelArg.isWriteInjective = false;
 
@@ -526,7 +550,7 @@ struct MeKernelAnalysis : public FunctionPass {
           ArrayBounds = isl_set_read_from_str(ctx, BoundsAnnotation.str().c_str());
         }
 
-        if (readMap) {
+        if (readMap && checkPVMapParameters(readMap)) {
           isl_map *M = nullptr;
           StringRef ForcedMap = getPrefixedGlobalAnnotation(&F, {"me-readmap", arg.getName()}).trim();
           if (ForcedMap != "") {
@@ -549,7 +573,7 @@ struct MeKernelAnalysis : public FunctionPass {
           isl_map_free(M);
         }
 
-        if (writeMap) {
+        if (writeMap && checkPVMapParameters(writeMap)) {
           isl_map *M = nullptr;
           StringRef ForcedMap = getPrefixedGlobalAnnotation(&F, {"me-writemap", arg.getName()}).trim();
           if (ForcedMap != "") {
