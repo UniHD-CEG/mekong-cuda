@@ -57,7 +57,7 @@ local function substitute_kernel_launch(str, fn)
     c_args = string.sub(c_args, 2, -2) -- remove parentheses arounds kernel arguments
     -- check if there are any forms of braces in any of the lists
     assert(string.match(grid, CHECK), "unsupported kernel grid configuration")
-    assert(string.match(c_args, CHECK), "unsupported kernel arguments")
+    assert(c_args == "" or string.match(c_args, CHECK), "unsupported kernel arguments")
 
     -- split arguments to gridConfig into list
     local grid = string.split(grid, ",")
@@ -271,6 +271,13 @@ for _, filename in ipairs(kernelinfos) do
   end
 end
 
+-- set default values for kernels.
+-- required because lua can not automatically infer that missing entries in
+-- yaml might be arrays/maps
+for _, kernel in pairs(kernels) do
+  kernel['arguments'] = kernel['arguments'] or {}
+end
+
 -------------------------------------------------------------------------------
 -- Substitutions
 -------------------------------------------------------------------------------
@@ -358,9 +365,9 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
         cudaSetDevice(_me_i);
         {{ _kernel_name(name) }}<<< dim3(x, y, z), _me_block, _me_shared, _me_stream >>>
           ({{fn for idx, arg in ipairs(c_args) do
-             if idx > 1 then write(", ") end
              write(translate_argument(arg, kernel['arguments'][idx], "_me_i"))
-           end}}, _me_subgrid.kernel);
+             write(", ")
+           end}}_me_subgrid.kernel);
       }
 
       // update writes (parallel to kernel execution)
