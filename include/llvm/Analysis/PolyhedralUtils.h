@@ -84,6 +84,7 @@ struct NVVMRewriter : public PVRewriter<PVType> {
       case Intrinsic::nvvm_read_ptx_sreg_nctaid_x: return "nvvm_nctaid_x";
       case Intrinsic::nvvm_read_ptx_sreg_nctaid_y: return "nvvm_nctaid_y";
       case Intrinsic::nvvm_read_ptx_sreg_nctaid_z: return "nvvm_nctaid_z";
+      default: return "";
     }
     return "";
   }
