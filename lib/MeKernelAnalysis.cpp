@@ -37,6 +37,7 @@
 #include <isl/ctx.h>
 #include <isl/map.h>
 #include <isl/set.h>
+#include <isl/aff.h>
 
 using namespace llvm;
 
@@ -96,7 +97,7 @@ bool isKernel(const Function &F) {
  * one or more whitespace characters. The value returned does not contain the
  * prefix.
  */
-StringRef getPrefixedGlobalAnnotation(const GlobalValue* V, ArrayRef<StringRef> Prefix) {
+std::string getPrefixedGlobalAnnotation(const GlobalValue* V, ArrayRef<StringRef> Prefix) {
   const auto *M = V->getParent();
 
   // Taken and cleaned up from:
@@ -145,7 +146,7 @@ StringRef getPrefixedGlobalAnnotation(const GlobalValue* V, ArrayRef<StringRef> 
       }
       if (!matches) continue;
 
-      return AS;
+      return AS.trim();
     }
   }
   return "";
@@ -248,6 +249,33 @@ bool checkPVMapParameters(PVMap &M) {
   return true;
 }
 
+/** Eliminate "invalid" parameters.
+ * Parameters are considered invalid if they are none of:
+ * a) NVVM intrinsics (including pseudo intrinsics like block offset)
+ * b) Function arguments
+ */
+void cleanupPVMapParameters(PVMap *M) {
+  SmallVector<PVId, 16> parameters;
+  M->getParameters(parameters);
+
+  // We check for valid parameters and exit early if the parameter is one.
+  // Reaching the end of a loop iterations then means that parameter is
+  // not a valid parameter for us.
+  for (auto parameter : parameters) {
+    auto name = parameter.str();
+    auto *value = parameter.getPayloadAs<Value*>();
+    // check if "cuda intrinsic" as understood by NVVMRewriter
+    if (name.find("nvvm_") == 0) {
+      continue;
+    }
+    // check if value is literal function argument
+    if (isa<Argument>(value)) {
+      continue;
+    }
+    // not a valid parameter, eliminate
+    M->eliminateParameter(parameter);
+  }
+}
 
 /** Force input dims to specific format as used by our analysis. If a dimension
  * name is found in the parameters, move from there, otherwise create a new
@@ -294,22 +322,6 @@ __isl_give isl_map* fixInputDims(__isl_take isl_map* map) {
   map = isl_map_project_out(map, isl_dim_in, numNames, numDims - numNames);
   assert(isl_map_dim(map, isl_dim_in) == numNames);
   return map;
-}
-
-/** Intersect domain that collapsed thread blocks to a singular thread for injectivity
- * analysis.
- */
-__isl_give isl_map* intersectCollapsedBlockDomain(__isl_take isl_map* M) {
-  const char* domain =
-  "[] -> { \
-    [boff_z, boff_y, boff_x, bid_z, bid_y, bid_x, tid_z, tid_y, tid_x] : \
-    tid_z = 0 and tid_y = 0 and tid_x = 0 \
-  }";
-  isl_ctx *Ctx = isl_map_get_ctx(M);
-  isl_set *S = isl_set_read_from_str(Ctx, domain);
-  M = isl_map_intersect_domain(M, S);
-  M = isl_map_project_out(M, isl_dim_in, 6, 3);
-  return M;
 }
 
 /** Intersect domain that collapsed thread blocks to a singular thread for injectivity
@@ -378,11 +390,16 @@ __isl_give isl_map* cullInputDims(__isl_take isl_map* M) {
 
 /** Checks for write "injectivity". Our "injectivity" differs from regular injectivity
  * in that unused dimensions are projected out.
- * Expects: M to have 9 input dimensions: boff.$w, bid.$w, tid.$w
+ * Expects preprocessed map.
  */ 
 bool isInjectiveEnough(__isl_take isl_map* M) {
-  M = intersectCollapsedBlockDomain(M);
-  M = cullInputDims(M);
+  // Reduce blocks to one thread in each direction.
+  // There is probably a better criterion to decide whether accesses on thread block
+  // level are injective.
+  const char* domain = "[bdim_z, bdim_y, bdim_x] -> { : bdim_z = 1 and bdim_y = 1 and bdim_x = 1 }";
+  isl_ctx *Ctx = isl_map_get_ctx(M);
+  isl_set *S = isl_set_read_from_str(Ctx, domain);
+  M = isl_map_intersect_params(M, S);
   bool result = isl_map_is_injective(M) && (isl_map_dim(M, isl_dim_in) > 0);
   isl_map_free(M);
   return result;
@@ -463,16 +480,143 @@ std::string typeToString(const Type* t) {
   return rso.str();
 }
 
+/** collect parameters from an access map that are arguments to the function
+ * containing the access.
+ */
+void collectMapParameters(__isl_keep isl_map *M, SmallSet<const Value*,4> *Parameters, Function *F) {
+  int numParams = isl_map_dim(M, isl_dim_param);
+
+  for (int i = 0; i < numParams; ++i) {
+    const char* name = isl_map_get_dim_name(M, isl_dim_param, i);
+    for (auto const &arg : F->args()) {
+      if (arg.getName() == name) {
+        Parameters->insert(&arg);
+        break;
+      }
+    }
+  }
+}
+
 struct MeKernelAnalysis : public FunctionPass {
     static char ID;
     static AnalysisKey Key;
 
+    mekong::Kernel* kernel;
+    PACCSummary *PS;
 
     MeKernelAnalysis() : FunctionPass(ID) {
       kernel = nullptr;
+      PS = nullptr;
     }
 
-    mekong::Kernel* kernel;
+    PACCSummary* getAccessSummary(Function &F) {
+      if (PS == nullptr) {
+          auto& PAI = getAnalysis<PolyhedralAccessInfoWrapperPass>().getPolyhedralAccessInfo();
+          PS = PAI.getAccessSummary(F, PACCSummary::SSK_COMPLETE);
+          NVVMRewriter<PVMap, false> CudaRewriter;
+          PS->rewrite(CudaRewriter);
+      }
+      return PS;
+    }
+
+    struct IslArrayInfo {
+      IslArrayInfo()
+      : ctx(nullptr), readMap(nullptr), writeMap(nullptr)
+      {}
+      ~IslArrayInfo() {
+        if (readMap) isl_map_free(readMap);
+        if (writeMap) isl_map_free(writeMap);
+        for (auto *dim: dims) isl_pw_multi_aff_free(dim);
+        if (ctx) isl_ctx_free(ctx);
+      }
+      isl_ctx *ctx;
+      isl_map *readMap;
+      isl_map *writeMap;
+      SmallVector<isl_pw_multi_aff*, 4> dims;
+    };
+
+    enum MapType {
+      READMAP,
+      WRITEMAP,
+    };
+
+    /** Collect cleaned up info array usage.
+     */
+    IslArrayInfo *getArrayInfo(Argument &arg) {
+      Function *F = arg.getParent();
+
+      IslArrayInfo *result = new IslArrayInfo;
+
+      isl_ctx *ctx = isl_ctx_alloc();
+      result->ctx = ctx;
+
+      isl_set *bounds = nullptr;
+
+      std::string BoundsAnnotation = getPrefixedGlobalAnnotation(F, {"me-bounds", arg.getName()});
+      if (BoundsAnnotation != "") {
+        bounds = isl_set_read_from_str(ctx, BoundsAnnotation.c_str());
+      }
+
+      result->readMap = getMapForArgument(arg, READMAP, {"me-readmap", arg.getName()}, ctx);
+      result->writeMap = getMapForArgument(arg, WRITEMAP, {"me-writemap", arg.getName()}, ctx);
+      if (bounds != nullptr) {
+        result->readMap = intersectRange(result->readMap, isl_set_copy(bounds));
+        result->writeMap = intersectRange(result->writeMap, isl_set_copy(bounds));
+      }
+
+      std::string DimsAnnotation = getPrefixedGlobalAnnotation(F, {"me-dims", arg.getName()});
+      if (DimsAnnotation != "") {
+        llvm_unreachable("dimension size annotations not implemented");
+      } else {
+        const ArrayInfo* arrayInfo = getAccessSummary(*F)->getArrayInfoForPointer(&arg);
+        for (const auto *pexp : arrayInfo->DimensionSizes) {
+          isl_pw_multi_aff *dim = isl_pw_multi_aff_read_from_str(ctx, pexp->getPWA().str().c_str());
+          result->dims.push_back(dim);
+        }
+      }
+      return result;
+    }
+
+    /** return access (read or write) as ISL map for the given arguments.
+     * If provided via annotation, use the annotation, otherwise use polyhedral analysis.
+     */
+    __isl_give isl_map *getMapForArgument(Argument& arg, MapType type, ArrayRef<StringRef> Prefix, isl_ctx *ctx) {
+      Function *F = arg.getParent();
+
+      isl_map *M = nullptr;
+
+      std::string ForcedMap = getPrefixedGlobalAnnotation(F, Prefix);
+      if (ForcedMap != "") { // Use map from annotation
+        M = isl_map_read_from_str(ctx, ForcedMap.c_str());
+
+      } else {
+        const ArrayInfo* arrayInfo = getAccessSummary(*F)->getArrayInfoForPointer(&arg);
+        if (arrayInfo == nullptr) {
+          return nullptr;
+        }
+        PVMap map;
+        if (type == READMAP) {
+          map = PVMap(arrayInfo->MustReadMap).union_add(arrayInfo->MayReadMap);
+        } else if (type == WRITEMAP) {
+          map = PVMap(arrayInfo->MustWriteMap).union_add(arrayInfo->MayWriteMap);
+        } else {
+          llvm_unreachable("invalid map type");
+        }
+        if (!map) {
+          return nullptr;
+        }
+
+        cleanupPVMapParameters(&map);
+        M = isl_map_read_from_str(ctx, map.str().c_str());
+        M = renameCudaIntrinsics(M, isl_dim_param);
+      }
+
+      M = fixInputDims(M);
+      M = intersectBlockDomain(M);
+      M = cullInputDims(M);
+      return M;
+    }
+
 
     /** Run analysis on each kernel prospect
      * @param  F  Reference to kernel we want to inspect
@@ -492,10 +636,10 @@ struct MeKernelAnalysis : public FunctionPass {
       // arguments that are parameters to isl maps
       SmallSet<const Value*,4> Parameters;
 
-      auto& PAI = getAnalysis<PolyhedralAccessInfoWrapperPass>().getPolyhedralAccessInfo();
-      PACCSummary *PS = PAI.getAccessSummary(F, PACCSummary::SSK_COMPLETE);
-      NVVMRewriter<PVMap, false> CudaRewriter;
-      PS->rewrite(CudaRewriter);
+      // auto& PAI = getAnalysis<PolyhedralAccessInfoWrapperPass>().getPolyhedralAccessInfo();
+      // PACCSummary *PS = PAI.getAccessSummary(F, PACCSummary::SSK_COMPLETE);
+      // NVVMRewriter<PVMap, false> CudaRewriter;
+      // PS->rewrite(CudaRewriter);
 
       bool splittable = true;
 
@@ -525,91 +669,113 @@ struct MeKernelAnalysis : public FunctionPass {
         kernelArg.isReadInjective = false;
         kernelArg.isWriteInjective = false;
 
-        const ArrayInfo* arrayInfo = PS->getArrayInfoForPointer(&arg);
-        if (arrayInfo == nullptr) {
-          continue;
-        }
+        // const ArrayInfo* arrayInfo = PS->getArrayInfoForPointer(&arg);
+        // if (arrayInfo == nullptr) {
+        //   continue;
+        // }
 
-        auto readMap = PVMap(arrayInfo->MustReadMap).union_add(arrayInfo->MayReadMap);
-        auto writeMap = PVMap(arrayInfo->MustWriteMap).union_add(arrayInfo->MayWriteMap);
+        // auto readMap = PVMap(arrayInfo->MustReadMap).union_add(arrayInfo->MayReadMap);
+        // auto writeMap = PVMap(arrayInfo->MustWriteMap).union_add(arrayInfo->MayWriteMap);
 
-        size_t NumParams = readMap.getNumParameters();
-        for (size_t i = 0; i < NumParams; ++i) {
-          Parameters.insert(readMap.getParameter(i).getPayloadAs<Value *>());
-        }
-        NumParams = writeMap.getNumParameters();
-        for (size_t i = 0; i < NumParams; ++i) {
-          Parameters.insert(writeMap.getParameter(i).getPayloadAs<Value *>());
-        }
+        // size_t NumParams = readMap.getNumParameters();
+        // for (size_t i = 0; i < NumParams; ++i) {
+        //   Parameters.insert(readMap.getParameter(i).getPayloadAs<Value *>());
+        // }
+        // NumParams = writeMap.getNumParameters();
+        // for (size_t i = 0; i < NumParams; ++i) {
+        //   Parameters.insert(writeMap.getParameter(i).getPayloadAs<Value *>());
+        // }
 
-        isl_ctx *ctx = isl_ctx_alloc();
+        IslArrayInfo *arrayInfo = getArrayInfo(arg);
 
-        StringRef BoundsAnnotation = getPrefixedGlobalAnnotation(&F, {"me-bounds", arg.getName()});
-        isl_set *ArrayBounds = nullptr;
-        if (BoundsAnnotation != "") {
-          ArrayBounds = isl_set_read_from_str(ctx, BoundsAnnotation.str().c_str());
-        }
+        //isl_ctx *ctx = isl_ctx_alloc();
 
-        if (readMap && checkPVMapParameters(readMap)) {
-          isl_map *M = nullptr;
-          StringRef ForcedMap = getPrefixedGlobalAnnotation(&F, {"me-readmap", arg.getName()}).trim();
-          if (ForcedMap != "") {
-            M = isl_map_read_from_str(ctx, ForcedMap.str().c_str());
-          } else {
-            M = isl_map_read_from_str(ctx, readMap.str().c_str());
-            M = renameCudaIntrinsics(M, isl_dim_param);
-          }
-          M = fixInputDims(M);
+        //StringRef BoundsAnnotation = getPrefixedGlobalAnnotation(&F, {"me-bounds", arg.getName()});
+        //isl_set *ArrayBounds = nullptr;
+        //if (BoundsAnnotation != "") {
+        //  ArrayBounds = isl_set_read_from_str(ctx, BoundsAnnotation.str().c_str());
+        //}
+
+        isl_map *M;
+
+        M = arrayInfo->readMap;
+        if (M) {
+          collectMapParameters(M, &Parameters, &F);
           kernelArg.isReadInjective = isInjectiveEnough(isl_map_copy(M));
-          M = intersectBlockDomain(M);
-          M = cullInputDims(M);
-          if (ArrayBounds != nullptr) {
-            M = intersectRange(M, isl_set_copy(ArrayBounds));
-          }
-
-          kernelArg.readMap = isl_map_to_str(M);
           kernelArg.isReadBounded = isMapRangeBounded(isl_map_copy(M));
-
-          isl_map_free(M);
+          kernelArg.readMap = isl_map_to_str(M);
         }
 
-        if (writeMap && checkPVMapParameters(writeMap)) {
-          isl_map *M = nullptr;
-          StringRef ForcedMap = getPrefixedGlobalAnnotation(&F, {"me-writemap", arg.getName()}).trim();
-          if (ForcedMap != "") {
-            M = isl_map_read_from_str(ctx, ForcedMap.str().c_str());
-          } else {
-            M = isl_map_read_from_str(ctx, writeMap.str().c_str());
-            M = renameCudaIntrinsics(M, isl_dim_param);
-          }
-          M = fixInputDims(M);
+        M = arrayInfo->writeMap;
+        if (M) {
+          collectMapParameters(M, &Parameters, &F);
           kernelArg.isWriteInjective = isInjectiveEnough(isl_map_copy(M));
-          M = intersectBlockDomain(M);
-          M = cullInputDims(M);
-          if (ArrayBounds != nullptr) {
-            M = intersectRange(M, isl_set_copy(ArrayBounds));
-          }
-
-          kernelArg.writeMap = isl_map_to_str(M);
           kernelArg.isWriteBounded = isMapRangeBounded(isl_map_copy(M));
+          kernelArg.writeMap = isl_map_to_str(M);
 
           suggestions.push_back(guessPartitioning(M));
-
-          isl_map_free(M);
           splittable = splittable & kernelArg.isWriteInjective;
         }
-        if (ArrayBounds) {
-          isl_set_free(ArrayBounds);
-        }
-        isl_ctx_free(ctx);
 
-        for (const auto *pexp : arrayInfo->DimensionSizes) {
-          kernelArg.dimsizes.push_back(pexp->getPWA().str());
+        for (auto *pwaff : arrayInfo->dims) {
+          kernelArg.dimsizes.push_back(isl_pw_multi_aff_to_str(pwaff));
         }
+
+        //if (readMap && checkPVMapParameters(readMap)) {
+        //  isl_map *M = nullptr;
+        //  StringRef ForcedMap = getPrefixedGlobalAnnotation(&F, {"me-readmap", arg.getName()}).trim();
+        //  if (ForcedMap != "") {
+        //    M = isl_map_read_from_str(ctx, ForcedMap.str().c_str());
+        //  } else {
+        //    M = isl_map_read_from_str(ctx, readMap.str().c_str());
+        //    M = renameCudaIntrinsics(M, isl_dim_param);
+        //  }
+        //  M = fixInputDims(M);
+        //  kernelArg.isReadInjective = isInjectiveEnough(isl_map_copy(M));
+        //  M = intersectBlockDomain(M);
+        //  M = cullInputDims(M);
+        //  if (ArrayBounds != nullptr) {
+        //    M = intersectRange(M, isl_set_copy(ArrayBounds));
+        //  }
+
+        //  kernelArg.readMap = isl_map_to_str(M);
+        //  kernelArg.isReadBounded = isMapRangeBounded(isl_map_copy(M));
+
+        //  isl_map_free(M);
+        //}
+
+        // if (writeMap && checkPVMapParameters(writeMap)) {
+        //   isl_map *M = nullptr;
+        //   StringRef ForcedMap = getPrefixedGlobalAnnotation(&F, {"me-writemap", arg.getName()}).trim();
+        //   if (ForcedMap != "") {
+        //     M = isl_map_read_from_str(ctx, ForcedMap.str().c_str());
+        //   } else {
+        //     M = isl_map_read_from_str(ctx, writeMap.str().c_str());
+        //     M = renameCudaIntrinsics(M, isl_dim_param);
+        //   }
+        //   M = fixInputDims(M);
+        //   kernelArg.isWriteInjective = isInjectiveEnough(isl_map_copy(M));
+        //   M = intersectBlockDomain(M);
+        //   M = cullInputDims(M);
+        //   if (ArrayBounds != nullptr) {
+        //     M = intersectRange(M, isl_set_copy(ArrayBounds));
+        //   }
+
+        //   kernelArg.writeMap = isl_map_to_str(M);
+        //   kernelArg.isWriteBounded = isMapRangeBounded(isl_map_copy(M));
+
+        //   suggestions.push_back(guessPartitioning(M));
+
+        //   isl_map_free(M);
+        //   splittable = splittable & kernelArg.isWriteInjective;
+        // }
+
+        // for (const auto *pexp : arrayInfo->DimensionSizes) {
+        //   kernelArg.dimsizes.push_back(pexp->getPWA().str());
+        // }
       }
 
-
-      StringRef PartitioningSuggestion = getPrefixedGlobalAnnotation(&F, {"me-partitioning"}).trim();
+      StringRef PartitioningSuggestion = getPrefixedGlobalAnnotation(&F, {"me-partitioning"});
       if (PartitioningSuggestion != "") {
         kernel->partitioning = PartitioningSuggestion;
       } else {
@@ -665,6 +831,7 @@ struct MeKernelAnalysis : public FunctionPass {
     }
 
     void releaseMemory() override {
+      PS = nullptr;
       if (kernel != nullptr) {
         delete kernel;
         kernel = nullptr;

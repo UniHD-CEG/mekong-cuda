@@ -394,7 +394,7 @@ contents = substitute_kernel_launch(contents, function(orig, name, grid, c_args)
   -- unsplittable
   else 
 
-    logf("unsplittable kernel %s", name)
+    logf("unsplittable kernel '%s'", name)
 
     return string.template([[
   // ++++++++ UNPARTITIONED KERNEL {{name}} <<< {{join(grid, ", ")}} >>> ({{join(c_args, ", ")}})
