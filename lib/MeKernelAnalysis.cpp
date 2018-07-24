@@ -97,7 +97,7 @@ bool isKernel(const Function &F) {
  * one or more whitespace characters. The value returned does not contain the
  * prefix.
  */
-std::string getPrefixedGlobalAnnotation(const GlobalValue* V, ArrayRef<StringRef> Prefix) {
+std::pair<bool, std::string> getPrefixedGlobalAnnotation(const GlobalValue* V, ArrayRef<StringRef> Prefix) {
   const auto *M = V->getParent();
 
   // Taken and cleaned up from:
@@ -105,7 +105,7 @@ std::string getPrefixedGlobalAnnotation(const GlobalValue* V, ArrayRef<StringRef
 
   // the first operand holds the metadata
   GlobalVariable* GA = M->getGlobalVariable("llvm.global.annotations");
-  if (!GA) return "";
+  if (!GA) return std::make_pair(false, "");
 
   for (Value *AOp : GA->operands()) {
     // all metadata are stored in an array of struct of metadata
@@ -146,10 +146,10 @@ std::string getPrefixedGlobalAnnotation(const GlobalValue* V, ArrayRef<StringRef
       }
       if (!matches) continue;
 
-      return AS.trim();
+      return std::make_pair(true, AS.trim());
     }
   }
-  return "";
+  return std::make_pair(false, "");
 }
 
 /** Try to match the filter with the function. Multiple expressions are
@@ -546,9 +546,9 @@ struct MeKernelAnalysis : public FunctionPass {
 
       isl_set *bounds = nullptr;
 
-      std::string BoundsAnnotation = getPrefixedGlobalAnnotation(F, {"me-bounds", arg.getName()});
-      if (BoundsAnnotation != "") {
-        bounds = isl_set_read_from_str(ctx, BoundsAnnotation.c_str());
+      auto BoundsAnnotation = getPrefixedGlobalAnnotation(F, {"me-bounds", arg.getName()});
+      if (BoundsAnnotation.first) {
+        bounds = isl_set_read_from_str(ctx, BoundsAnnotation.second.c_str());
       }
 
       result->readMap = getMapForArgument(arg, READMAP, {"me-readmap", arg.getName()}, ctx);
@@ -567,9 +567,9 @@ struct MeKernelAnalysis : public FunctionPass {
         isl_set_free(bounds);
       }
 
-      std::string DimsAnnotation = getPrefixedGlobalAnnotation(F, {"me-dims", arg.getName()});
-      if (DimsAnnotation != "") {
-        StringRef dims = DimsAnnotation;
+      auto DimsAnnotation = getPrefixedGlobalAnnotation(F, {"me-dims", arg.getName()});
+      if (DimsAnnotation.first) {
+        StringRef dims = DimsAnnotation.second;
         dims = dims.trim();
         auto isSep = [](char ch) -> bool { return ch == '|'; };
         while (dims != "") {
@@ -599,9 +599,9 @@ struct MeKernelAnalysis : public FunctionPass {
 
       isl_map *M = nullptr;
 
-      std::string ForcedMap = getPrefixedGlobalAnnotation(F, Prefix);
-      if (ForcedMap != "") { // Use map from annotation
-        M = isl_map_read_from_str(ctx, ForcedMap.c_str());
+      auto ForcedMap = getPrefixedGlobalAnnotation(F, Prefix);
+      if (ForcedMap.first) { // Use map from annotation
+        M = isl_map_read_from_str(ctx, ForcedMap.second.c_str());
 
       } else {
         const ArrayInfo* arrayInfo = getAccessSummary(*F)->getArrayInfoForPointer(&arg);
@@ -644,8 +644,8 @@ struct MeKernelAnalysis : public FunctionPass {
       kernel->name = demangle(F.getName());
       kernel->mangled_name = (F.getName()).str();
 
-      StringRef forceIgnore = getPrefixedGlobalAnnotation(&F, {"me-ignore"});
-      if (forceIgnore != "") {
+      auto forceIgnore = getPrefixedGlobalAnnotation(&F, {"me-ignore"});
+      if (forceIgnore.first) {
         kernel->partitioning = "none";
         return false;
       }
@@ -713,9 +713,9 @@ struct MeKernelAnalysis : public FunctionPass {
         }
       }
 
-      StringRef PartitioningSuggestion = getPrefixedGlobalAnnotation(&F, {"me-partitioning"});
-      if (PartitioningSuggestion != "") {
-        kernel->partitioning = PartitioningSuggestion;
+      auto PartitioningSuggestion = getPrefixedGlobalAnnotation(&F, {"me-partitioning"});
+      if (PartitioningSuggestion.first) {
+        kernel->partitioning = PartitioningSuggestion.second;
       } else {
         if (splittable) {
           Partitioning suggestion = combinePartitioningSuggestions(suggestions);
