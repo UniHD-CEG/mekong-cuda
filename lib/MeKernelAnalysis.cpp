@@ -890,11 +890,16 @@ struct MeKernelAnalysisWrapper : public ModulePass {
   }
 
   void serialize(StringRef Outfile) {
-    std::error_code EC;
-    sys::fs::OpenFlags Flags = sys::fs::F_RW | sys::fs::F_Text;
-    raw_fd_ostream OS(Outfile, EC, Flags);
-    app->serialize(OS);
-    OS.close();
+    if (Outfile == "-") {
+      app->serialize(outs());
+    } else {
+      std::error_code EC;
+      sys::fs::OpenFlags Flags = sys::fs::F_RW | sys::fs::F_Text;
+      raw_fd_ostream OS(Outfile, EC, Flags);
+      app->serialize(OS);
+      OS.close();
+    }
+
   }
 
   void print(raw_ostream &OS, const Module *) const override {
