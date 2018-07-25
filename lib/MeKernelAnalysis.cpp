@@ -632,25 +632,37 @@ struct MeKernelAnalysis : public FunctionPass {
       return M;
     }
 
-
-    /** Run analysis on each kernel prospect
-     * @param  F  Reference to kernel we want to inspect
-     * @return modified?
-     */
-    bool runOnFunction(Function &F) override {
+    mekong::Kernel* dontAnalyzeKernel(Function &F) {
       const DataLayout &DL = F.getParent()->getDataLayout();
-
-      kernel = new mekong::Kernel();
-
+      mekong::Kernel *kernel = new mekong::Kernel();
       kernel->name = demangle(F.getName());
       kernel->mangled_name = (F.getName()).str();
-
-      auto forceIgnore = getPrefixedGlobalAnnotation(&F, {"me-ignore"});
-      if (forceIgnore.first) {
-        kernel->partitioning = "none";
-        return false;
+      kernel->partitioning = "none";
+      for (auto &arg : F.args()) {
+        kernel->arguments.push_back(mekong::Argument());
+        mekong::Argument &kernelArg = kernel->arguments.back();
+        Type* t = arg.getType();
+        kernelArg.name = arg.getName();
+        kernelArg.typeName = typeToString(t);
+        kernelArg.isParameter = false;
+        kernelArg.isPointer = t->isPointerTy();
+        if (!kernelArg.isPointer) {
+          kernelArg.bitsize = DL.getTypeStoreSizeInBits(t);
+          kernelArg.elementBitsize = DL.getTypeStoreSizeInBits(t);
+        } else {
+          Type* elT = dyn_cast<PointerType>(t)->getElementType();
+          kernelArg.bitsize = DL.getPointerTypeSizeInBits(t);
+          kernelArg.elementBitsize = DL.getTypeStoreSizeInBits(elT);
+        }
       }
+      return kernel;
+    }
 
+    mekong::Kernel* analyzeKernel(Function &F) {
+      const DataLayout &DL = F.getParent()->getDataLayout();
+      mekong::Kernel *kernel = new mekong::Kernel();
+      kernel->name = demangle(F.getName());
+      kernel->mangled_name = (F.getName()).str();
       kernel->partitioned_name = "__" + kernel->name + "_subgrid";
 
       SmallVector<Partitioning,4> suggestions;
@@ -733,6 +745,22 @@ struct MeKernelAnalysis : public FunctionPass {
         if (Parameters.count(&arg) > 0) {
           kernelArg.isParameter = true;
         }
+      }
+      return kernel;
+    }
+
+
+    /** Run analysis on each kernel prospect
+     * @param  F  Reference to kernel we want to inspect
+     * @return modified?
+     */
+    bool runOnFunction(Function &F) override {
+      // check for analysis bypass
+      auto forceIgnore = getPrefixedGlobalAnnotation(&F, {"me-ignore"});
+      if (forceIgnore.first) {
+        kernel = dontAnalyzeKernel(F);
+      } else {
+        kernel = analyzeKernel(F);
       }
       return false;
     }
