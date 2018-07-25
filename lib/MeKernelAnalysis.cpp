@@ -243,7 +243,6 @@ bool checkPVMapParameters(PVMap &M) {
     if (isa<Argument>(value)) {
       continue;
     }
-    //errs() << "not a parameter: " << name << "\n";
     return false;
   }
   return true;
@@ -583,9 +582,11 @@ struct MeKernelAnalysis : public FunctionPass {
         }
       } else {
         const ArrayInfo* arrayInfo = getAccessSummary(*F)->getArrayInfoForPointer(&arg);
-        for (const auto *pexp : arrayInfo->DimensionSizes) {
-          isl_pw_multi_aff *dim = isl_pw_multi_aff_read_from_str(ctx, pexp->getPWA().str().c_str());
-          result->dims.push_back(dim);
+        if (arrayInfo != nullptr) {
+          for (const auto *pexp : arrayInfo->DimensionSizes) {
+            isl_pw_multi_aff *dim = isl_pw_multi_aff_read_from_str(ctx, pexp->getPWA().str().c_str());
+            result->dims.push_back(dim);
+          }
         }
       }
       return result;
@@ -661,6 +662,7 @@ struct MeKernelAnalysis : public FunctionPass {
 
       // collect infos about arguments
       for (auto &arg : F.args()) {
+
         kernel->arguments.push_back(mekong::Argument());
         mekong::Argument& kernelArg = kernel->arguments.back();
 
