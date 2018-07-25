@@ -832,7 +832,7 @@ struct MeKernelAnalysisWrapper : public ModulePass {
       app->serialize(outs());
     } else {
       std::error_code EC;
-      sys::fs::OpenFlags Flags = sys::fs::F_RW | sys::fs::F_Text;
+      sys::fs::OpenFlags Flags = sys::fs::F_Text;
       raw_fd_ostream OS(Outfile, EC, Flags);
       app->serialize(OS);
       OS.close();
