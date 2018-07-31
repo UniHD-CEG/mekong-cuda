@@ -1,25 +1,16 @@
 set(LLVM_NO_RTTI 1)
 
-add_subdirectory(Analysis/isl)
-
 add_llvm_loadable_module(LLVMMekong
   Mekong.cpp
-  
-  Analysis/PolyhedralAccessInfo.cpp
-  Analysis/PolyhedralDependenceInfo.cpp
-  Analysis/PolyhedralExpressionBuilder.cpp
-  Analysis/PolyhedralUtils.cpp
-  Analysis/PolyhedralValueInfo.cpp
-  Analysis/PValue.cpp
 
   IslBuilder.cpp
 
-  RegisterPasses.cpp
-  MeModel.cpp
+  RegisterPasses.cpp MeModel.cpp
   MeKernelAnalysis.cpp
   MeReplaceCuda.cpp
   MeCodegen.cpp
   MeKernelSubgrid.cpp
+  MeAnalyzeBuffers.cpp
   )
 
 if (LLVM_LINK_LLVM_DYLIB)

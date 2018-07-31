@@ -32,12 +32,6 @@ class PolyhedralExpressionBuilder;
 class PACC {
 public:
 
-  enum ScopeKind {
-    SK_FUNCTION,
-    SK_LOOP,
-    SK_ITERATION,
-  };
-
   enum AccessKind {
     AK_READ,
     AK_WRITE,

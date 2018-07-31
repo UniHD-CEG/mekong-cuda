@@ -15,6 +15,8 @@
 #include "llvm/Analysis/PolyhedralValueInfo.h"
 #include "llvm/IR/InstVisitor.h"
 
+#include <map>
+
 namespace llvm {
 
 /// A cache that maps values/basic blocks and scopes to the computed polyhedral
@@ -23,12 +25,12 @@ namespace llvm {
 class PolyhedralValueInfoCache final {
 
   /// Mapping from scoped basic blocks to their domain expressed as a PEXP.
-  using DomainMapKey = std::pair<BasicBlock *, Loop *>;
-  DenseMap<DomainMapKey, PEXP *> DomainMap;
+  using DomainMapKey = std::tuple<BasicBlock *, Loop *>;
+  std::map<DomainMapKey, PEXP *> DomainMap;
 
   /// Mapping from scoped values to their polyhedral representation.
-  using ValueMapKey = std::pair<Value *, Loop *>;
-  DenseMap<ValueMapKey, PEXP *> ValueMap;
+  using ValueMapKey = std::tuple<Value *, Loop *>;
+  std::map<ValueMapKey, PEXP *> ValueMap;
 
   /// Mapping from scoped loops to their backedge taken count.
   using LoopMapKey = std::pair<const Loop *, Loop *>;
@@ -81,12 +83,10 @@ public:
   ~PolyhedralValueInfoCache();
 
   /// Return the cached polyhedral representation of @p V in @p Scope, if any.
-  PEXP *lookup(Value &V, Loop *Scope) { return ValueMap.lookup({&V, Scope}); }
+  PEXP *lookup(Value &V, Loop *Scope) { return ValueMap[{&V, Scope}]; }
 
   /// Return the cached polyhedral representation of @p BB in @p Scope, if any.
-  PEXP *lookup(BasicBlock &BB, Loop *Scope) {
-    return DomainMap.lookup({&BB, Scope});
-  }
+  PEXP *lookup(BasicBlock &BB, Loop *Scope) { return DomainMap[{&BB, Scope}]; }
 
   /// Return the cached backedge taken count of @p L in @p Scope, if any.
   PEXP *lookup(const Loop &L, Loop *Scope) {
@@ -143,6 +143,7 @@ class PolyhedralExpressionBuilder
     : public InstVisitor<PolyhedralExpressionBuilder, PEXP *> {
 
   Loop *Scope;
+  Loop *UseLocation;
 
   PolyhedralValueInfo &PI;
   PolyhedralValueInfoCache PIC;

@@ -6,6 +6,7 @@
 #include "mekong/Passes.h"
 
 namespace {
+
 struct MekongForcePassLinking {
   MekongForcePassLinking() {
     // We must reference the passes in such a way that compilers will not
