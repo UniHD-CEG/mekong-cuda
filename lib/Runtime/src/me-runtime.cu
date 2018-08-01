@@ -11,6 +11,7 @@
 // format: ":: copying  start-offset .. end-offset, base_src (tag_src) -> base_dst (tag_dest)
 #define PRITRANSFER ":: copying %" PRId64 " .. %" PRId64 ", %p (%d) -> %p (%d)\n"
 #define PRITRANSFERHOST ":: copying %" PRId64 " .. %" PRId64 ", %p (%d) -> %p (N/A)\n"
+#define PRITRANSFERDEV ":: copying %" PRId64 " .. %" PRId64 ", %p (N/A) -> %p (%d)\n"
 
 // format: ":: tagging  start-offset .. end-offset, virtualbuf = base (tag)
 #define PRITAGGING  ":: tagging %" PRId64 " .. %" PRId64 ", %p = %p (%d)\n"
@@ -428,7 +429,6 @@ cudaError_t __me_buffer_broadcast(void* dst, const void* src, size_t count) {
   VirtualBuffer *vb = (VirtualBuffer*)dst;
   MemTracker<int> &mt = vb->getTracker();
 
-
   MELOG(3, ":: buffer broadcast from host buffer %p\n", src);
 
   int tag = 0;
@@ -478,6 +478,35 @@ cudaError_t __me_buffer_broadcast(void* dst, const void* src, size_t count) {
   }
   mt.update(0, count, tag);
   MELOG(4, PRITAGGING, (int64_t)0, (int64_t)count, vb, buf, tag);
+  return cudaSuccess;
+}
+
+/** Linearly distribute a host buffer over all devices.
+ *
+ * Conditions:
+ *  - dst is a virtual buffer
+ *  - src is a host buffer
+ */
+cudaError_t __me_buffer_distribute_linear(void* dst, const void* src, size_t count) {
+  VirtualBuffer *vb = (VirtualBuffer*)dst;
+  MemTracker<int> &mt = vb->getTracker();
+
+  MELOG(3, ":: buffer distribute from host buffer %p\n", src);
+
+  const int numGPUs = __me_num_gpus();
+
+  size_t chunksize = (count + numGPUs - 1) / numGPUs;
+  for (int i = 0; i < numGPUs; ++i) {
+    char *deviceBase = (char*)vb->getInstance(i + 1);
+    int64_t offset = i * chunksize;
+    int64_t size = (offset+chunksize <= count) ? offset+chunksize : count;
+
+    MELOG(4, PRITRANSFERDEV, offset, offset+size, src, deviceBase, i+1);
+
+    assert(cudaSetDevice(i) == cudaSuccess && "unable to set device");
+    cudaMemcpyAsync(deviceBase + offset, src, size, cudaMemcpyHostToDevice);
+  }
+
   return cudaSuccess;
 }
 
