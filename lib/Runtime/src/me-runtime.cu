@@ -83,17 +83,20 @@ void __me_initialize() {
     meState.log_level = DEFAULTLOGLEVEL;
   }
 
-  static const char* YES[] = {"y", "yes", "on", "1", "true", "enable", "enabled"};
-  const char* MEUNSAFE_ENV = getenv("MEUNSAFE");
-  meState.safe_mode = true;
-  if (MEUNSAFE_ENV != nullptr) {
-    for (int i = 0; i < sizeof(YES)/sizeof(YES[0]); ++i) {
-      if (strcasecmp(MEUNSAFE_ENV, YES[i]) == 0 ) {
-        meState.safe_mode = false;
-        break;
-      }
-    }
+  const char* dist_env = getenv("MEDISTRIBUTE");
+  meState.dist_mode = DISTRIBUTE_INVALID;
+  if (strcasecmp(dist_env, "defer_safe")) {
+    meState.dist_mode = DISTRIBUTE_DEFER_SAFE;
+  } else if (strcasecmp(dist_env, "defer_unsafe")) {
+    meState.dist_mode = DISTRIBUTE_DEFER_UNSAFE;
+  } else if (strcasecmp(dist_env, "linear")) {
+    meState.dist_mode = DISTRIBUTE_LINEAR;
   }
+  if (meState.dist_mode == DISTRIBUTE_INVALID) {
+    MELOG(0, ":: no distribute mode selected, using defer_safe\n");
+    meState.dist_mode = DISTRIBUTE_DEFER_SAFE;
+  }
+
 
   meState.initialized = true;
 }
@@ -418,66 +421,77 @@ cudaError_t __me_buffer_gather(void* dstBase, const void* src, size_t count) {
 }
 
 /** "Broadcast" buffer from host to all devices.
- * This operation does not initiate any actual transfers. The only side effect
- * is a buffer update that signals that all data is located on the host.
+ * This operation creates an internal copy of the host buffer and updates the
+ * tracker to pull data from this internal copy. This avoids WAR hazards.
  *
  * Conditions:
  *  - dst is a virtual buffer
  *  - src is a host buffer
  */
-cudaError_t __me_buffer_broadcast(void* dst, const void* src, size_t count) {
+cudaError_t __me_htod_defer_safe(void* dst, const void* src, size_t count) {
   VirtualBuffer *vb = (VirtualBuffer*)dst;
   MemTracker<int> &mt = vb->getTracker();
-
-  MELOG(3, ":: buffer broadcast from host buffer %p\n", src);
+  MELOG(3, ":: buffer defer safe from host buffer %p\n", src);
 
   int tag = 0;
-  const void* buf = nullptr;
 
-  // create internalized shadow copies of host buffers to prevent WAR conflicts
-  if (meState.safe_mode) {
-    // try to find source buffer referenced in shadow list
-    size_t n = meState.shadows.size();
-    ShadowCopy* shadow = nullptr;
-    for (int i = 0; i < n; ++i) {
-      if (meState.shadows[i].reference == src) {
-        shadow = &meState.shadows[i];
-        break;
-      }
+  // try to find source buffer referenced in shadow list
+  size_t n = meState.shadows.size();
+  ShadowCopy* shadow = nullptr;
+  for (int i = 0; i < n; ++i) {
+    if (meState.shadows[i].reference == src) {
+      shadow = &meState.shadows[i];
+      break;
     }
+  }
 
-    if (shadow) {
-      if (shadow->size >= count) { // existing shadow is big enough
-        tag = vb->findOrInsertHostReference((void*)shadow->shadow);
-        MELOG(4, ":: reusing shadow at %p (%d)\n", src, tag);
-        memcpy(shadow->shadow, src, count);
-      } else { // existing shadow too small, need to reallocate
-        tag = vb->findOrInsertHostReference((void*)shadow->shadow);
-        free(shadow->shadow);
-        shadow->shadow = malloc(count);
-        assert(shadow->shadow != nullptr);
-        vb->updateInstance(tag, shadow->shadow);
-        shadow->size = count;
-        MELOG(4, ":: reallocated buffer to %p (%d)\n", shadow->shadow, tag);
-        memcpy(shadow->shadow, src, count);
-      }
-    } else {
-      meState.shadows.push_back(ShadowCopy());
-      shadow = &meState.shadows.back();
-      shadow->reference = src;
-      shadow->shadow = malloc(count);
-      shadow->size = count;
+  // reuse if big enough
+  if (shadow) {
+    if (shadow->size >= count) { // existing shadow is big enough
       tag = vb->findOrInsertHostReference((void*)shadow->shadow);
-      MELOG(4, ":: created shadow %p (%d)\n", shadow->shadow, tag);
+      MELOG(4, ":: reusing shadow at %p (%d)\n", src, tag);
+      memcpy(shadow->shadow, src, count);
+    } else { // existing shadow too small, need to reallocate
+      tag = vb->findOrInsertHostReference((void*)shadow->shadow);
+      free(shadow->shadow);
+      shadow->shadow = malloc(count);
+      assert(shadow->shadow != nullptr);
+      vb->updateInstance(tag, shadow->shadow);
+      shadow->size = count;
+      MELOG(4, ":: reallocated buffer to %p (%d)\n", shadow->shadow, tag);
       memcpy(shadow->shadow, src, count);
     }
-    buf = shadow->shadow;
   } else {
-    tag = vb->findOrInsertHostReference((void*)src); // :'(
-    buf = src;
+    meState.shadows.push_back(ShadowCopy());
+    shadow = &meState.shadows.back();
+    shadow->reference = src;
+    shadow->shadow = malloc(count);
+    shadow->size = count;
+    tag = vb->findOrInsertHostReference((void*)shadow->shadow);
+    MELOG(4, ":: created shadow %p (%d)\n", shadow->shadow, tag);
+    memcpy(shadow->shadow, src, count);
   }
+
   mt.update(0, count, tag);
-  MELOG(4, PRITAGGING, (int64_t)0, (int64_t)count, vb, buf, tag);
+  MELOG(4, PRITAGGING, (int64_t)0, (int64_t)count, vb, src, tag);
+  return cudaSuccess;
+}
+
+/** "Broadcast" buffer from host to all devices.
+ * This buffer does not create an internal copy of the host buffer and also does
+ * not copy any data, but merely updates the tracker. It is at risk for WAR hazards.
+ *
+ * Conditions:
+ *  - dst is a virtual buffer
+ *  - src is a host buffer
+ */
+cudaError_t __me_htod_defer_unsafe(void* dst, const void* src, size_t count) {
+  VirtualBuffer *vb = (VirtualBuffer*)dst;
+  MemTracker<int> &mt = vb->getTracker();
+  MELOG(3, ":: buffer defer unsafe from host buffer %p\n", src);
+  int tag = vb->findOrInsertHostReference((void*)src); // :'(
+  mt.update(0, count, tag);
+  MELOG(4, PRITAGGING, (int64_t)0, (int64_t)count, vb, src, tag);
   return cudaSuccess;
 }
 
@@ -487,10 +501,9 @@ cudaError_t __me_buffer_broadcast(void* dst, const void* src, size_t count) {
  *  - dst is a virtual buffer
  *  - src is a host buffer
  */
-cudaError_t __me_buffer_distribute_linear(void* dst, const void* src, size_t count) {
+cudaError_t __me_htod_distribute_linear(void* dst, const void* src, size_t count) {
   VirtualBuffer *vb = (VirtualBuffer*)dst;
   MemTracker<int> &mt = vb->getTracker();
-
   MELOG(3, ":: buffer distribute from host buffer %p\n", src);
 
   const int numGPUs = __me_num_gpus();
@@ -505,10 +518,36 @@ cudaError_t __me_buffer_distribute_linear(void* dst, const void* src, size_t cou
 
     assert(cudaSetDevice(i) == cudaSuccess && "unable to set device");
     cudaMemcpyAsync(deviceBase + offset, src, size, cudaMemcpyHostToDevice);
+
+    int tag = i + 1;
+
+    MELOG(4, PRITAGGING, (int64_t)offset, (int64_t)offset+size, vb, src, tag);
+    mt.update(offset, offset+size, tag);
   }
 
   return cudaSuccess;
 }
+
+/** Dispatch function for htod memcopies
+ *
+ * Conditions:
+ *  - dst is a virtual buffer
+ *  - src is a host buffer
+ */
+cudaError_t __me_htod(void* dst, const void* src, size_t count) {
+  switch (meState.dist_mode) {
+  case DISTRIBUTE_DEFER_SAFE:
+    return __me_htod_defer_safe(dst, src, count);
+  case DISTRIBUTE_DEFER_UNSAFE:
+    return __me_htod_defer_unsafe(dst, src, count);
+  case DISTRIBUTE_LINEAR:
+    return __me_htod_distribute_linear(dst, src, count);
+  default:
+    assert(false && "invalid distribute mode");
+  }
+  return cudaSuccess;
+}
+
 
 /*******************************************************************************
  * MEKONG CUDA WRAPPERS
@@ -575,7 +614,7 @@ cudaError_t __meMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpy
 
   switch (kind) {
   case cudaMemcpyHostToDevice:
-    result = __me_buffer_broadcast(dst, src, count);
+    result = __me_htod(dst, src, count);
     break;
   case cudaMemcpyHostToHost:
     result = cudaMemcpy(dst, src, count, kind);

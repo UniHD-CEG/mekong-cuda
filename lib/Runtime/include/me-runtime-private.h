@@ -38,13 +38,20 @@ typedef struct {
   size_t size;
 } ShadowCopy;
 
+enum DistributeMode {
+  DISTRIBUTE_INVALID,
+  DISTRIBUTE_DEFER_SAFE,
+  DISTRIBUTE_DEFER_UNSAFE,
+  DISTRIBUTE_LINEAR,
+};
+
 typedef struct {
   bool initialized;
   int numGPUs;
   std::vector<ShadowCopy> shadows;
 
   int log_level;
-  bool safe_mode;
+  enum DistributeMode dist_mode;
 } MeState;
 
 #endif
