@@ -94,9 +94,13 @@ void __me_initialize() {
     meState.dist_mode = DISTRIBUTE_LINEAR;
   }
   if (meState.dist_mode == DISTRIBUTE_INVALID) {
-    MELOG(0, ":: no distribute mode selected, using defer_safe\n");
-    meState.dist_mode = DISTRIBUTE_DEFER_SAFE;
+    meState.dist_mode = DISTRIBUTE_LINEAR;
   }
+
+  const char *mode_names[] = {
+    "invalid", "defer_safe", "defer_unsafe", "linear"
+  };
+  MELOG(1, ":: distribute mode: %s\n", mode_names[meState.dist_mode]);
 
 
   meState.initialized = true;
