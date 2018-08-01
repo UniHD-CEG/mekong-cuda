@@ -83,13 +83,14 @@ void __me_initialize() {
     meState.log_level = DEFAULTLOGLEVEL;
   }
 
-  const char* dist_env = getenv("MEDISTRIBUTE");
+  const char* dist_env = getenv("MEDISTMODE");
+  if (dist_env == NULL) dist_env = "";
   meState.dist_mode = DISTRIBUTE_INVALID;
-  if (strcasecmp(dist_env, "defer_safe")) {
+  if (strcasecmp(dist_env, "defer_safe") == 0) {
     meState.dist_mode = DISTRIBUTE_DEFER_SAFE;
-  } else if (strcasecmp(dist_env, "defer_unsafe")) {
+  } else if (strcasecmp(dist_env, "defer_unsafe") == 0) {
     meState.dist_mode = DISTRIBUTE_DEFER_UNSAFE;
-  } else if (strcasecmp(dist_env, "linear")) {
+  } else if (strcasecmp(dist_env, "linear") == 0) {
     meState.dist_mode = DISTRIBUTE_LINEAR;
   }
   if (meState.dist_mode == DISTRIBUTE_INVALID) {
@@ -504,20 +505,23 @@ cudaError_t __me_htod_defer_unsafe(void* dst, const void* src, size_t count) {
 cudaError_t __me_htod_distribute_linear(void* dst, const void* src, size_t count) {
   VirtualBuffer *vb = (VirtualBuffer*)dst;
   MemTracker<int> &mt = vb->getTracker();
-  MELOG(3, ":: buffer distribute from host buffer %p\n", src);
+  MELOG(3, ":: buffer distribute from host buffer %p, size: %zu\n", src, count);
 
   const int numGPUs = __me_num_gpus();
 
   size_t chunksize = (count + numGPUs - 1) / numGPUs;
   for (int i = 0; i < numGPUs; ++i) {
-    char *deviceBase = (char*)vb->getInstance(i + 1);
+    void *deviceBase = vb->getInstance(i + 1);
     int64_t offset = i * chunksize;
-    int64_t size = (offset+chunksize <= count) ? offset+chunksize : count;
+    int64_t size = (offset+chunksize <= count) ? chunksize : (count - offset);
+
+    void *srcReal = ((char*)src)+offset;
+    void *dstReal = ((char*)deviceBase)+offset;
 
     MELOG(4, PRITRANSFERDEV, offset, offset+size, src, deviceBase, i+1);
 
     assert(cudaSetDevice(i) == cudaSuccess && "unable to set device");
-    cudaMemcpyAsync(deviceBase + offset, src, size, cudaMemcpyHostToDevice);
+    assert(cudaMemcpyAsync(dstReal, srcReal, size, cudaMemcpyHostToDevice) == cudaSuccess);
 
     int tag = i + 1;
 
