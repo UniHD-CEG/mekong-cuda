@@ -3,6 +3,7 @@
 #include "cuda_runtime_api.h"
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
+#include <sys/time.h>
 
 #include "me-runtime.h"
 #include "me-runtime-private.h"
@@ -638,4 +639,12 @@ cudaError_t __meMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpy
     assert(false && "invalid cudaMemcpyKind");
   }
   return result;
+}
+
+double __me_now(void) {
+  struct timeval time;
+  if (gettimeofday(&time, NULL)) {
+    return 0;
+  }
+  return (double)time.tv_sec + (double)time.tv_usec / 1e6;
 }

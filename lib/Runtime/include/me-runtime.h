@@ -34,6 +34,7 @@ cudaError_t __meMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpy
 
 // Mekong custom functions
 int __me_num_gpus(void);
+double __me_now(void);
 void __me_sync(void);
 void* __me_nth_array(void* buf, int i);
 
