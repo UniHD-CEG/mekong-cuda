@@ -537,6 +537,63 @@ cudaError_t __me_htod_distribute_linear(void* dst, const void* src, size_t count
   return cudaSuccess;
 }
 
+// 1d linear distribution
+std::tuple<int64_t, int64_t, int> distribution_linear_1d(size_t buffer_size, int gpus, int64_t start) {
+  size_t chunk_size = (buffer_size + gpus - 1) / gpus;
+  // calculate next multiple of chunk_size equal to or greater than from
+  int64_t rem = start % chunk_size;
+  if (rem != 0) {
+    start = start + chunk_size - rem;
+  }
+  if (start + chunk_size > buffer_size) {
+    chunk_size = (buffer_size - start);
+  }
+  int target = start / chunk_size;
+  return std::make_tuple(start, chunk_size, target);
+}
+
+// 2d linear distribution (assumes rectangular array)
+std::tuple<int64_t, int64_t, int> distribution_linear_2d(size_t buffer_size, int gpus, int64_t start) {
+  MELOG(0, "NOT IMPLEMENTED");
+  abort();
+  return std::make_tuple(0, 0, 0);
+}
+
+/** Distribute host buffer using an arbitrary pattern defined in the pattern function.
+ *
+ * Conditions:
+ *  - dst is a virtual buffer
+ *  - src is a host buffer
+ */
+cudaError_t __me_htod_distribute_pattern(void* dst, const void* src, size_t count, __me_pattern_fn pattern) {
+  VirtualBuffer *vb = (VirtualBuffer*)dst;
+  MemTracker<int> &mt = vb->getTracker();
+  MELOG(3, ":: buffer distribute (pattern) from host buffer %p, size: %zu\n", src, count);
+
+  const int numGPUs = __me_num_gpus();
+
+  int64_t chunk_start, chunk_size;
+  int chunk_target;
+ 
+  chunk_start = 0;
+  std::tie(chunk_start, chunk_size, chunk_target) = pattern(count, numGPUs, chunk_start);
+
+  // stop at first chunk bigger than buffer size
+  while (chunk_start < count) {
+    int tag = chunk_target + 1;
+    void *deviceBase = vb->getInstance(tag);
+    void *srcReal = ((char*)src)+chunk_start;
+    void *dstReal = ((char*)deviceBase)+chunk_start;
+    MELOG(4, PRITRANSFERDEV, chunk_start, chunk_start+chunk_size, src, deviceBase, tag);
+    assert(cudaSetDevice(chunk_target) == cudaSuccess && "unable to set device");
+    assert(cudaMemcpyAsync(dstReal, srcReal, chunk_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    MELOG(4, PRITAGGING, chunk_start, chunk_start+chunk_size, vb, src, tag);
+    mt.update(chunk_start, chunk_start+chunk_size, tag);
+    std::tie(chunk_start, chunk_size, chunk_target) = pattern(count, numGPUs, chunk_start);
+  }
+  return cudaSuccess;
+}
+
 /** Dispatch function for htod memcopies
  *
  * Conditions:
