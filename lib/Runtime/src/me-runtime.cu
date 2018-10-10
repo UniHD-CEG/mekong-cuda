@@ -72,6 +72,54 @@ void __me_partition_linear_z(__subgrid_t* part, int partIdx, int nParts, dim3 or
 }
 
 /*******************************************************************************
+ * DEBUGGING
+ *******************************************************************************/
+
+// strcasecmp on its own says s1 == s2 if s1 prefixes s2
+static int matches(const char* s1, const char* s2, size_t n) {
+  return (strncasecmp(s1, s2, n) == 0 && strlen(s2) == n);
+}
+
+static int transfers_enabled() {
+  return ( (meState.debug & DEBUG_NO_TRANSFERS) == 0)
+    && ( (meState.debug & DEBUG_NO_PATTERNS) == 0);
+}
+
+static int patterns_enabled() {
+  return (meState.debug & DEBUG_NO_PATTERNS) == 0;
+}
+
+static int parse_debug(const char* s) {
+  int result = 0;
+
+  if (s == NULL) {
+    return result;
+  }
+
+  const char *start;
+  const char *end;
+  while (*s != '\0') {
+    // skip whitespace, empty fields
+    while (*s == ' ' || *s == '\t' || *s == ',') s++;
+    if (*s == '\0') break;
+    start = s;
+    while (*s != ' ' && *s != '\t' && *s != ',' && *s != '\0') s++;
+    end = s;
+    size_t len = end - start;
+
+    if (matches(start, "notransfers", len)) {
+      result |= DEBUG_NO_TRANSFERS;
+    } else if (matches(start, "nopatterns", len)) {
+      result |= DEBUG_NO_PATTERNS;
+    } else {
+      MELOG(0, ":: invalid debug flag: %.*s\n", (int)(end-start), start);
+      exit(1);
+    }
+  }
+  return result;
+}
+
+/*******************************************************************************
  * MEKONG CUSTOM FUNCTIONALITY
  *******************************************************************************/
 
@@ -103,6 +151,8 @@ void __me_initialize() {
   };
   MELOG(1, ":: distribute mode: %s\n", mode_names[meState.dist_mode]);
 
+  meState.debug = parse_debug(getenv("MEDEBUG"));
+  MELOG(1, ":: debug flags: 0x%x\n", meState.debug);
 
   meState.initialized = true;
 }
@@ -157,17 +207,18 @@ static void __me_sync_flush(__me_sync_info *info) {
 
   MELOG(4, PRITRANSFER, start, end, srcBufBase, from, dstBufBase, to);
 
-  cudaError_t result;
-  if (from < 0 && to < 0) {
-    cudaAssert(cudaMemcpyAsync(dstBuf, srcBuf, count, cudaMemcpyHostToHost));
-  } else if (from < 0 && to > 0) {
-    cudaAssert(cudaMemcpyAsync(dstBuf, srcBuf, count, cudaMemcpyHostToDevice));
-  } else if (from > 0 && to < 0) {
-    cudaAssert(cudaMemcpyAsync(dstBuf, srcBuf, count, cudaMemcpyDeviceToHost));
-  } else if (from > 0 && to > 0) {
-    cudaAssert(cudaMemcpyAsync(dstBuf, srcBuf, count, cudaMemcpyDeviceToDevice));
-  } else {
-    unreachable("this should not have happened");
+  if (transfers_enabled()) {
+    if (from < 0 && to < 0) {
+      cudaAssert(cudaMemcpyAsync(dstBuf, srcBuf, count, cudaMemcpyHostToHost));
+    } else if (from < 0 && to > 0) {
+      cudaAssert(cudaMemcpyAsync(dstBuf, srcBuf, count, cudaMemcpyHostToDevice));
+    } else if (from > 0 && to < 0) {
+      cudaAssert(cudaMemcpyAsync(dstBuf, srcBuf, count, cudaMemcpyDeviceToHost));
+    } else if (from > 0 && to > 0) {
+      cudaAssert(cudaMemcpyAsync(dstBuf, srcBuf, count, cudaMemcpyDeviceToDevice));
+    } else {
+      unreachable("this should not have happened");
+    }
   }
 }
 
@@ -228,24 +279,28 @@ void __me_buffer_sync(void* buf, int forGPU, __me_itfn_t iterator,
     int elementSize, __subgrid_t* subgrid, int64_t* params) {
   VirtualBuffer *vb = (VirtualBuffer*)buf;
   MemTracker<int> &mt = vb->getTracker();
-  __subgrid_full_t *full = &subgrid->full;
-  int64_t grid[15] = { full->zmin * full->zdim, full->zmax * full->zdim,
-    full->ymin * full->ydim, full->ymax * full->ydim,
-    full->xmin * full->xdim, full->xmax * full->xdim,
-    full->zmin, full->zmax, full->ymin, full->ymax, full->xmin, full->xmax,
-    full->zdim, full->ydim, full->xdim };
-  MELOG(3, ":: buffer sync to device %d, elSize: %d\n", forGPU+1, elementSize);
-  MELOG(7, ":: gridDim: %" PRId64 ", %" PRId64 "; %" PRId64 ", %" PRId64
-      "; %" PRId64 ",%" PRId64 "  blockDim: %" PRId64 ", %" PRId64 ", %" PRId64 "\n",
-      grid[6], grid[7], grid[8], grid[9], grid[10], grid[11],
-      grid[12], grid[13], grid[14]);
-  __me_sync_info info = {vb, &mt, 0, 0, 0, forGPU+1, elementSize, false};
-  iterator(grid, params, __me_sync_cb, &info);
-  // if there was at least one chunk (indicated by lastSrc being updated), flush last chunk
-  if (info.lastSrc != 0) {
-    __me_sync_flush(&info);
+
+  if (patterns_enabled()) {
+
+    __subgrid_full_t *full = &subgrid->full;
+    int64_t grid[15] = { full->zmin * full->zdim, full->zmax * full->zdim,
+      full->ymin * full->ydim, full->ymax * full->ydim,
+      full->xmin * full->xdim, full->xmax * full->xdim,
+      full->zmin, full->zmax, full->ymin, full->ymax, full->xmin, full->xmax,
+      full->zdim, full->ydim, full->xdim };
+    MELOG(3, ":: buffer sync to device %d, elSize: %d @ %p\n", forGPU+1, elementSize, buf);
+    MELOG(7, ":: gridDim: %" PRId64 ", %" PRId64 "; %" PRId64 ", %" PRId64
+        "; %" PRId64 ",%" PRId64 "  blockDim: %" PRId64 ", %" PRId64 ", %" PRId64 "\n",
+        grid[6], grid[7], grid[8], grid[9], grid[10], grid[11],
+        grid[12], grid[13], grid[14]);
+    __me_sync_info info = {vb, &mt, 0, 0, 0, forGPU+1, elementSize, false};
+
+    iterator(grid, params, __me_sync_cb, &info);
+    // if there was at least one chunk (indicated by lastSrc being updated), flush last chunk
+    if (info.lastSrc != 0) {
+      __me_sync_flush(&info);
+    }
   }
-  //assert(cudaStreamSynchronize(0) == cudaSuccess);
 }
 
 /** Synchronize whole buffer for a given GPU, ignore memory access patterns.
@@ -263,28 +318,33 @@ void __me_buffer_sync_all(void* buf, int forGPU) {
   MemTracker<int> &mt = vb->getTracker();
 
   assert(forGPU >= 0 && "invalid target GPU");
-  MELOG(3, ":: buffer sync all to device %d\n", forGPU+1);
 
-  MemTracker<int>::Chunk chunk;
-  int64_t count = INT64_MAX;
+  if (patterns_enabled()) {
 
-  int dstTag = forGPU+1;
-  void *dstBase = vb->getInstance(dstTag);
+    MELOG(3, ":: buffer sync all to device %d\n", forGPU+1);
 
-  while (mt.queryRange2(0, count, &chunk)) {
-    MELOG(6, ":: chunk %" PRId64 " .. %" PRId64 " @ %d\n", chunk.start, chunk.end, chunk.tag);
-    if (chunk.tag == 0) {
-      continue;
+    MemTracker<int>::Chunk chunk;
+    int64_t count = INT64_MAX;
+
+    int dstTag = forGPU+1;
+    void *dstBase = vb->getInstance(dstTag);
+
+    while (mt.queryRange2(0, count, &chunk)) {
+      MELOG(6, ":: chunk %" PRId64 " .. %" PRId64 " @ %d\n", chunk.start, chunk.end, chunk.tag);
+      if (chunk.tag == 0) {
+        continue;
+      }
+      assert(chunk.tag > 0 && "sync all only supported for gpu");
+      void *srcBase = vb->getInstance(chunk.tag);
+      char* chunkDst = (char*)dstBase + chunk.start;
+      char* chunkSrc = (char*)srcBase + chunk.start;
+      size_t chunkSize = chunk.end - chunk.start;
+      if (transfers_enabled()) {
+        MELOG(4, PRITRANSFER, chunk.start, chunk.end, srcBase, chunk.tag, dstBase, dstTag);
+        cudaAssert(cudaMemcpyAsync(chunkDst, chunkSrc, chunkSize, cudaMemcpyDeviceToDevice));
+      }
     }
-    assert(chunk.tag > 0 && "sync all only supported for gpu");
-    void *srcBase = vb->getInstance(chunk.tag);
-    char* chunkDst = (char*)dstBase + chunk.start;
-    char* chunkSrc = (char*)srcBase + chunk.start;
-    size_t chunkSize = chunk.end - chunk.start;
-    MELOG(4, PRITRANSFER, chunk.start, chunk.end, srcBase, chunk.tag, dstBase, dstTag);
-    cudaAssert(cudaMemcpyAsync(chunkDst, chunkSrc, chunkSize, cudaMemcpyDeviceToDevice));
   }
-  assert(cudaStreamSynchronize(0) == cudaSuccess);
 }
 
 /** Auxiliary structs for the buffer update
@@ -342,18 +402,20 @@ void __me_buffer_update(void* buf, int forGPU, __me_itfn_t iterator,
   VirtualBuffer *vb = (VirtualBuffer*)buf;
   MemTracker<int> &mt = vb->getTracker();
 
-  MELOG(3, ":: buffer update for device %d\n", forGPU+1);
+  if (patterns_enabled()) {
 
-  __subgrid_full_t *full = &subgrid->full;
-  int64_t grid[15] = { full->zmin * full->zdim, full->zmax * full->zdim,
-    full->ymin * full->ydim, full->ymax * full->ydim,
-    full->xmin * full->xdim, full->xmax * full->xdim,
-    full->zmin, full->zmax, full->ymin, full->ymax, full->xmin, full->xmax,
-    full->zdim, full->ydim, full->xdim };
-  __me_update_info info = { vb, &mt, forGPU+1, elementSize, -1, -1 };
-  iterator(grid, params, __me_update_cb, &info);
-  // flush last iteration
-  __me_update_flush(&info);
+    MELOG(3, ":: buffer update for device %d\n", forGPU+1);
+    __subgrid_full_t *full = &subgrid->full;
+    int64_t grid[15] = { full->zmin * full->zdim, full->zmax * full->zdim,
+      full->ymin * full->ydim, full->ymax * full->ydim,
+      full->xmin * full->xdim, full->xmax * full->xdim,
+      full->zmin, full->zmax, full->ymin, full->ymax, full->xmin, full->xmax,
+      full->zdim, full->ydim, full->xdim };
+    __me_update_info info = { vb, &mt, forGPU+1, elementSize, -1, -1 };
+    iterator(grid, params, __me_update_cb, &info);
+    // flush last iteration
+    __me_update_flush(&info);
+  }
 }
 
 /** Update whole buffer, ignore memory access patterns. First identifiestotal
@@ -369,24 +431,26 @@ void __me_buffer_update_all(void* buf, int forGPU) {
   VirtualBuffer *vb = (VirtualBuffer*)buf;
   MemTracker<int> &mt = vb->getTracker();
 
-  assert(forGPU >= 0 && "invalid owner GPU");
-  MELOG(3, ":: buffer update all to device %d\n", forGPU+1);
+  if (patterns_enabled()) {
+    assert(forGPU >= 0 && "invalid owner GPU");
+    MELOG(3, ":: buffer update all to device %d\n", forGPU+1);
 
-  MemTracker<int>::Chunk chunk;
-  int64_t count = INT64_MAX;
-  int64_t lower = INT64_MAX;
-  int64_t upper = -INT64_MAX;
+    MemTracker<int>::Chunk chunk;
+    int64_t count = INT64_MAX;
+    int64_t lower = INT64_MAX;
+    int64_t upper = -INT64_MAX;
 
-  while (mt.queryRange2(0, count, &chunk)) {
-    MELOG(6, ":: chunk %" PRId64 " .. %" PRId64 " @ %d\n", chunk.start, chunk.end, chunk.tag);
-    if (chunk.tag == 0) {
-      continue;
+    while (mt.queryRange2(0, count, &chunk)) {
+      MELOG(6, ":: chunk %" PRId64 " .. %" PRId64 " @ %d\n", chunk.start, chunk.end, chunk.tag);
+      if (chunk.tag == 0) {
+        continue;
+      }
+      if (chunk.start < lower) lower = chunk.start;
+      if (chunk.end > upper) upper = chunk.end;
     }
-    if (chunk.start < lower) lower = chunk.start;
-    if (chunk.end > upper) upper = chunk.end;
+    MELOG(4, ":: tagging %p, %" PRId64 " .. %" PRId64 " = %d\n", vb, lower, upper, forGPU+1);
+    mt.update(lower, upper, forGPU+1);
   }
-  MELOG(4, ":: tagging %p, %" PRId64 " .. %" PRId64 " = %d\n", vb, lower, upper, forGPU+1);
-  mt.update(lower, upper, forGPU+1);
 }
 
 /** "Gather" buffer pieces from potentially all devices to the host.
@@ -400,30 +464,28 @@ cudaError_t __me_buffer_gather(void* dstBase, const void* src, size_t count) {
   VirtualBuffer *vb = (VirtualBuffer*)src;
   MemTracker<int> &mt = vb->getTracker();
 
-  MELOG(3, ":: buffer gather to %p\n", dstBase);
+  if (patterns_enabled()) {
+    MELOG(3, ":: buffer gather to %p\n", dstBase);
 
-  MemTracker<int>::Chunk chunk;
-  cudaError_t res;
-  while (mt.queryRange2(0, count, &chunk)) {
-    MELOG(6, ":: chunk %" PRId64 " .. %" PRId64 " @%d\n", chunk.start, chunk.end, chunk.tag);
-    assert(chunk.tag != 0 && "requested range contains undefined chunks");
-    assert(chunk.tag > 0 && "gather only supported from gpu for now");
-    void *srcBase = vb->getInstance(chunk.tag);
-    char* chunkDst = (char*)dstBase + chunk.start;
-    char* chunkSrc = (char*)srcBase + chunk.start;
-    size_t chunkSize = chunk.end - chunk.start;
+    MemTracker<int>::Chunk chunk;
 
-    MELOG(4, PRITRANSFERHOST, chunk.start, chunk.end, srcBase, chunk.tag, dstBase);
+    while (mt.queryRange2(0, count, &chunk)) {
+      MELOG(6, ":: chunk %" PRId64 " .. %" PRId64 " @%d\n", chunk.start, chunk.end, chunk.tag);
+      assert(chunk.tag != 0 && "requested range contains undefined chunks");
+      assert(chunk.tag > 0 && "gather only supported from gpu for now");
+      void *srcBase = vb->getInstance(chunk.tag);
+      char* chunkDst = (char*)dstBase + chunk.start;
+      char* chunkSrc = (char*)srcBase + chunk.start;
+      size_t chunkSize = chunk.end - chunk.start;
 
-    //MELOG(4, ":: transfer %p : % 4" PRId64 " .. % 4" PRId64 ", %p -> %p\n",
-    //    vb, chunk.start, chunk.end, devInst, dst);
-    res = cudaMemcpyAsync(chunkDst, chunkSrc, chunkSize, cudaMemcpyDeviceToHost);
-    if (res != cudaSuccess) {
-      break;
+      if (transfers_enabled()) {
+        MELOG(4, PRITRANSFERHOST, chunk.start, chunk.end, srcBase, chunk.tag, dstBase);
+        assert(cudaMemcpyAsync(chunkDst, chunkSrc, chunkSize, cudaMemcpyDeviceToHost) == cudaSuccess);
+      }
     }
   }
-  
-  return res;
+
+  return cudaSuccess;
 }
 
 /** "Broadcast" buffer from host to all devices.
@@ -510,87 +572,36 @@ cudaError_t __me_htod_defer_unsafe(void* dst, const void* src, size_t count) {
 cudaError_t __me_htod_distribute_linear(void* dst, const void* src, size_t count) {
   VirtualBuffer *vb = (VirtualBuffer*)dst;
   MemTracker<int> &mt = vb->getTracker();
-  MELOG(3, ":: buffer distribute from host buffer %p, size: %zu\n", src, count);
 
-  const int numGPUs = __me_num_gpus();
 
-  size_t chunksize = (count + numGPUs - 1) / numGPUs;
-  for (int i = 0; i < numGPUs; ++i) {
-    void *deviceBase = vb->getInstance(i + 1);
-    int64_t offset = i * chunksize;
-    int64_t size = (offset+chunksize <= count) ? chunksize : (count - offset);
+  if (patterns_enabled()) {
+    MELOG(3, ":: buffer distribute from host buffer %p, size: %zu\n", src, count);
 
-    void *srcReal = ((char*)src)+offset;
-    void *dstReal = ((char*)deviceBase)+offset;
+    const int numGPUs = __me_num_gpus();
 
-    MELOG(4, PRITRANSFERDEV, offset, offset+size, src, deviceBase, i+1);
+    size_t chunksize = (count + numGPUs - 1) / numGPUs;
+    for (int i = 0; i < numGPUs; ++i) {
+      void *deviceBase = vb->getInstance(i + 1);
+      int64_t offset = i * chunksize;
+      int64_t size = (offset+chunksize <= count) ? chunksize : (count - offset);
 
-    assert(cudaSetDevice(i) == cudaSuccess && "unable to set device");
-    assert(cudaMemcpyAsync(dstReal, srcReal, size, cudaMemcpyHostToDevice) == cudaSuccess);
+      void *srcReal = ((char*)src)+offset;
+      void *dstReal = ((char*)deviceBase)+offset;
 
-    int tag = i + 1;
+      MELOG(4, PRITRANSFERDEV, offset, offset+size, src, deviceBase, i+1);
 
-    MELOG(4, PRITAGGING, (int64_t)offset, (int64_t)offset+size, vb, src, tag);
-    mt.update(offset, offset+size, tag);
+      if (transfers_enabled()) {
+        assert(cudaSetDevice(i) == cudaSuccess && "unable to set device");
+        assert(cudaMemcpyAsync(dstReal, srcReal, size, cudaMemcpyHostToDevice) == cudaSuccess);
+      }
+
+      int tag = i + 1;
+
+      MELOG(4, PRITAGGING, (int64_t)offset, (int64_t)offset+size, vb, src, tag);
+      mt.update(offset, offset+size, tag);
+    }
   }
 
-  return cudaSuccess;
-}
-
-// 1d linear distribution
-std::tuple<int64_t, int64_t, int> distribution_linear_1d(size_t buffer_size, int gpus, int64_t start) {
-  size_t chunk_size = (buffer_size + gpus - 1) / gpus;
-  // calculate next multiple of chunk_size equal to or greater than from
-  int64_t rem = start % chunk_size;
-  if (rem != 0) {
-    start = start + chunk_size - rem;
-  }
-  if (start + chunk_size > buffer_size) {
-    chunk_size = (buffer_size - start);
-  }
-  int target = start / chunk_size;
-  return std::make_tuple(start, chunk_size, target);
-}
-
-// 2d linear distribution (assumes rectangular array)
-std::tuple<int64_t, int64_t, int> distribution_linear_2d(size_t buffer_size, int gpus, int64_t start) {
-  MELOG(0, "NOT IMPLEMENTED");
-  abort();
-  return std::make_tuple(0, 0, 0);
-}
-
-/** Distribute host buffer using an arbitrary pattern defined in the pattern function.
- *
- * Conditions:
- *  - dst is a virtual buffer
- *  - src is a host buffer
- */
-cudaError_t __me_htod_distribute_pattern(void* dst, const void* src, size_t count, __me_pattern_fn pattern) {
-  VirtualBuffer *vb = (VirtualBuffer*)dst;
-  MemTracker<int> &mt = vb->getTracker();
-  MELOG(3, ":: buffer distribute (pattern) from host buffer %p, size: %zu\n", src, count);
-
-  const int numGPUs = __me_num_gpus();
-
-  int64_t chunk_start, chunk_size;
-  int chunk_target;
- 
-  chunk_start = 0;
-  std::tie(chunk_start, chunk_size, chunk_target) = pattern(count, numGPUs, chunk_start);
-
-  // stop at first chunk bigger than buffer size
-  while (chunk_start < count) {
-    int tag = chunk_target + 1;
-    void *deviceBase = vb->getInstance(tag);
-    void *srcReal = ((char*)src)+chunk_start;
-    void *dstReal = ((char*)deviceBase)+chunk_start;
-    MELOG(4, PRITRANSFERDEV, chunk_start, chunk_start+chunk_size, src, deviceBase, tag);
-    assert(cudaSetDevice(chunk_target) == cudaSuccess && "unable to set device");
-    assert(cudaMemcpyAsync(dstReal, srcReal, chunk_size, cudaMemcpyHostToDevice) == cudaSuccess);
-    MELOG(4, PRITAGGING, chunk_start, chunk_start+chunk_size, vb, src, tag);
-    mt.update(chunk_start, chunk_start+chunk_size, tag);
-    std::tie(chunk_start, chunk_size, chunk_target) = pattern(count, numGPUs, chunk_start);
-  }
   return cudaSuccess;
 }
 
@@ -669,14 +680,8 @@ cudaError_t __meFree(void* devPtr) {
   return cudaSuccess;
 }
 
-cudaError_t __meMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
-  cudaError_t result = __meMemcpyAsync(dst, src, count, kind);
-  cudaAssert(cudaStreamSynchronize(0));
-  return result;
-}
-
-cudaError_t __meMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
-  cudaError_t result;
+static cudaError_t __meMemcpyBase(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
+  cudaError_t result = cudaSuccess;
 
   switch (kind) {
   case cudaMemcpyHostToDevice:
@@ -695,6 +700,19 @@ cudaError_t __meMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpy
   default:
     assert(false && "invalid cudaMemcpyKind");
   }
+  return result;
+}
+
+cudaError_t __meMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
+  cudaError_t result = __meMemcpyBase(dst, src, count, kind);
+  if (!transfers_enabled()) {
+    __me_sync();
+  }
+  return result;
+}
+
+cudaError_t __meMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
+  cudaError_t result = __meMemcpyBase(dst, src, count, kind);
   return result;
 }
 

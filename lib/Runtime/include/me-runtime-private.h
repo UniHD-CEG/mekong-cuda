@@ -5,7 +5,6 @@
 
 #include "VirtualBuffer.h"
 #include <vector>
-#include <utility>
 
 #undef assert
 #define assert(cond) do { if (!(cond)) { printf("%s\n", #cond); abort(); } } while (0)
@@ -19,14 +18,6 @@
 #else
   #define MELOG(lvl, ...) do{ if (lvl <= meState.log_level) { printf("%*s", 2*lvl, ""); printf(__VA_ARGS__); } }while(0)
 #endif
-
-/* Provides a distribution of a buffer of a given size across some number of GPUs.
- * @param  buffer_size  size of the buffer
- * @param  gpus         number of gpus to distribute across partition
- * @param  start        return next chunk that starts here or later
- * @return a tuple containing chunk start, chunk size, and target gpu
- */
-typedef std::tuple<int64_t,int64_t,int>(*__me_pattern_fn)(size_t buffer_size, int gpus, size_t start);
 
 #define DEFAULTLOGLEVEL 0
 
@@ -54,6 +45,9 @@ enum DistributeMode {
   DISTRIBUTE_LINEAR,
 };
 
+#define DEBUG_NO_TRANSFERS (1)
+#define DEBUG_NO_PATTERNS  (2)
+
 typedef struct {
   bool initialized;
   int numGPUs;
@@ -61,6 +55,7 @@ typedef struct {
 
   int log_level;
   enum DistributeMode dist_mode;
+  int debug;
 } MeState;
 
 #endif
