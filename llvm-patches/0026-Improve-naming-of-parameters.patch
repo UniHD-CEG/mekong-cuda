@@ -1,0 +1,90 @@
+From cb2c822f25f998137782a4ec9e6b425a5f1ede16 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Thu, 13 Sep 2018 13:47:16 +0200
+Subject: [PATCH 26/29] Improve naming of parameters
+
+---
+ include/llvm/Analysis/PolyhedralUtils.h      | 2 +-
+ lib/Analysis/PolyhedralAccessInfo.cpp        | 9 ++++++---
+ lib/Analysis/PolyhedralExpressionBuilder.cpp | 4 ++++
+ 3 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/include/llvm/Analysis/PolyhedralUtils.h b/include/llvm/Analysis/PolyhedralUtils.h
+index 3e3f2aa..9396504 100644
+--- a/include/llvm/Analysis/PolyhedralUtils.h
++++ b/include/llvm/Analysis/PolyhedralUtils.h
+@@ -67,7 +67,7 @@ struct NVVMRewriter : public PVRewriter<PVType> {
+     return NVVMDIM_NONE;
+   }
+ 
+-  std::string getCudaIntrinsicName(Value *V) {
++  static std::string getCudaIntrinsicName(Value *V) {
+     auto *Intr = dyn_cast<IntrinsicInst>(V);
+     if (!Intr)
+       return "";
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 193f493..63a11f0 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -96,6 +96,10 @@ static bool isNVVMIdxCall(PolyhedralValueInfo &PI, const PEXP *PE) {
+   if (!II)
+     return false;
+   switch (II->getIntrinsicID()) {
++    case Intrinsic::nvvm_read_ptx_sreg_tid_x:
++    case Intrinsic::nvvm_read_ptx_sreg_tid_y:
++    case Intrinsic::nvvm_read_ptx_sreg_tid_z:
++    case Intrinsic::nvvm_read_ptx_sreg_tid_w:
+     case Intrinsic::nvvm_read_ptx_sreg_ctaid_x:
+     case Intrinsic::nvvm_read_ptx_sreg_ctaid_y:
+     case Intrinsic::nvvm_read_ptx_sreg_ctaid_z:
+@@ -185,7 +189,7 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
+   DEBUG({
+     dbgs() << "Found " << PotentialSizes.size() << " potential sizes:\n";
+     for (auto &It : PotentialSizes) {
+-      dbgs() << "- " << It.first << " : " << It.second.size() << "\n";
++      dbgs() << "- " << It.first << " : " << *It.second.front().first << "\n";
+     }
+   });
+ 
+@@ -526,7 +530,7 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+   OS << "Array infos:\n";
+   for (auto AIt : *this) {
+     Value *BasePointer = AIt.first;
+-    OS << "\tBase pointer: " << (BasePointer ? BasePointer->getName() : "<n/a>")
++    OS << "\n\tBase pointer: " << (BasePointer ? BasePointer->getName() : "<n/a>")
+        << "\n";
+     AIt.second->collectParameters(ParameterSet);
+     AIt.second->print(OS);
+@@ -590,7 +594,6 @@ void PACCSummary::ArrayInfo::print(raw_ostream &OS) const {
+     OS << "\t\tMayWrite: " << MayWriteMap << "\n";
+   if (MustWriteMap)
+     OS << "\t\tMustWrite: " << MustWriteMap << "\n";
+-  OS << "\n";
+   if (!DimSizesBytes.empty()) {
+     OS << "\t\tDimension sizes (Bytes):\n";
+     for (const PVAff &DimSize : DimSizesBytes)
+diff --git a/lib/Analysis/PolyhedralExpressionBuilder.cpp b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+index e6e5dd5..01d09ac 100644
+--- a/lib/Analysis/PolyhedralExpressionBuilder.cpp
++++ b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+@@ -13,6 +13,7 @@
+ #include "llvm/Analysis/PolyhedralExpressionBuilder.h"
+ 
+ #include "llvm/ADT/Statistic.h"
++#include "llvm/Analysis/PolyhedralUtils.h"
+ #include "llvm/Analysis/PolyhedralValueInfo.h"
+ #include "llvm/IR/Instructions.h"
+ #include "llvm/Support/Debug.h"
+@@ -37,6 +38,9 @@ PolyhedralValueInfoCache::~PolyhedralValueInfoCache() {
+ }
+ 
+ std::string PolyhedralValueInfoCache::getParameterNameForValue(Value &V) {
++  std::string CudaName = NVVMRewriter<PVAff>::getCudaIntrinsicName(&V);
++  if (!CudaName.empty())
++    return CudaName;
+   if (V.hasName())
+     return V.getName().str();
+   return "p" + std::to_string(ParameterMap.size());
+-- 
+1.8.3.1
+

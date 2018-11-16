@@ -1,0 +1,366 @@
+From 5e7a2c8dfa17b52f6f0dfb7918159180914e9435 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Tue, 6 Feb 2018 19:39:40 +0100
+Subject: [PATCH 07/29] Some new functions, work on the Cuda rewriter
+
+---
+ include/llvm/Analysis/PValue.h          | 21 +++++++
+ include/llvm/Analysis/PolyhedralUtils.h | 98 ++++++++++++++++++---------------
+ lib/Analysis/PValue.cpp                 | 78 +++++++++++++++++++++++++-
+ 3 files changed, 151 insertions(+), 46 deletions(-)
+
+diff --git a/include/llvm/Analysis/PValue.h b/include/llvm/Analysis/PValue.h
+index 770e6d7..a3d2d61 100644
+--- a/include/llvm/Analysis/PValue.h
++++ b/include/llvm/Analysis/PValue.h
+@@ -172,6 +172,10 @@ public:
+   PVSet &simplify(const PVSet &S);
+   PVSet &simplifyParameters(const PVSet &S);
+ 
++  PVSet &neg();
++  PVSet &add(const PVSet &S);
++  PVSet &sub(const PVSet &S);
++
+   /// Unify this set inplace with @p S.
+   PVSet &unify(const PVSet &S);
+ 
+@@ -235,6 +239,7 @@ public:
+   PVMap(const PVMap &Other);
+   PVMap(PVMap &&Other) : Obj(Other.Obj) { Other.Obj = nullptr; }
+   PVMap(ArrayRef<PVAff> Affs, const PVId &Id);
++  PVMap(const PVAff &Coeff, const PVId &Id, const PVBase &Base);
+   PVMap(const PVAff &Aff, long Factor);
+   PVMap(const PVId &ValId, const PVId &InputId = PVId(),
+         const PVId &OutputId = PVId());
+@@ -287,6 +292,8 @@ public:
+ 
+   void dropUnusedParameters();
+ 
++  PVAff getPVAffForDim(unsigned Dim);
++
+   void getParameters(SmallVectorImpl<PVId> &Parameters) const;
+   void getParameters(SmallVectorImpl<llvm::Value *> &Parameters) const;
+ 
+@@ -296,6 +303,10 @@ public:
+   using CombinatorFn = std::function<PVMap (const PVMap &, const PVMap &)>;
+   static CombinatorFn getCombinatorFn(IslCombinatorFn Fn);
+ 
++  PVMap &neg();
++  PVMap &add(const PVMap &S);
++  PVMap &sub(const PVMap &S);
++
+   PVMap &union_add(const PVMap &PM);
+   PVMap &floordiv(int64_t V);
+ 
+@@ -331,6 +342,7 @@ public:
+   PVAff(const PVSet &S);
+   PVAff(const PVSet &S, int64_t ConstVal);
+   PVAff(const PVBase &Base, unsigned CoeffPos, int64_t CoeffVal, const PVId &Id);
++  PVAff(const PVAff &Coeff, const PVId &Id, const PVBase &Base);
+   ///}
+ 
+   ~PVAff();
+@@ -360,6 +372,9 @@ public:
+   bool isEqual(const PVAff &Aff) const;
+ 
+   int getParameterPosition(const PVId &Id) const;
++  void eliminateParameter(unsigned Pos);
++  void eliminateParameter(const PVId &Id);
++
+   bool involvesId(const PVId &Id) const;
+   bool involvesInput(unsigned Dim) const;
+ 
+@@ -371,9 +386,14 @@ public:
+   void dropUnusedParameters();
+ 
+   PVId getParameter(unsigned No) const;
++  PVAff &setParameter(unsigned No, const PVId &Id);
++
+   void getParameters(SmallVectorImpl<PVId> &Parameters) const;
+   void getParameters(SmallVectorImpl<llvm::Value *> &Parameters) const;
+ 
++  void equateParameters(unsigned Pos0, unsigned Pos1);
++  void equateParameters(const PVId &Id0, const PVId &Id1);
++
+   PVAff extractFactor(const PVAff &Aff) const;
+   int getFactor(const PVAff &Aff) const;
+ 
+@@ -381,6 +401,7 @@ public:
+   PVAff &sub(const PVAff &PV);
+   PVAff &multiply(const PVAff &PV);
+   PVAff &union_add(const PVAff &PV);
++  PVAff &union_min(const PVAff &PV);
+ 
+   PVAff &select(const PVAff &PV0, const PVAff &PV1);
+ 
+diff --git a/include/llvm/Analysis/PolyhedralUtils.h b/include/llvm/Analysis/PolyhedralUtils.h
+index c4f03c6..31df41d 100644
+--- a/include/llvm/Analysis/PolyhedralUtils.h
++++ b/include/llvm/Analysis/PolyhedralUtils.h
+@@ -20,15 +20,16 @@ namespace llvm {
+ template<typename PVType, bool UseGlobalIdx = false>
+ struct NVVMRewriter : public PVRewriter<PVType> {
+   enum NVVMDim {
+-    NVVMDIM_NONE,
+-    NVVMDIM_X,
+-    NVVMDIM_Y,
+-    NVVMDIM_Z,
+-    NVVMDIM_W,
++    NVVMDIM_X = 0,
++    NVVMDIM_Y = 1,
++    NVVMDIM_Z = 2,
++    NVVMDIM_W = 3,
++    NVVMDIM_NONE = 4,
+   };
+ 
+   static constexpr unsigned NumNVVMDims = 4;
+   NVVMDim NVVMDims[NumNVVMDims] = {NVVMDIM_X, NVVMDIM_Y, NVVMDIM_Z, NVVMDIM_W};
++  std::string NVVMDimNames[NumNVVMDims] = {"x", "y", "z", "w"};
+ 
+   bool isIntrinsic(Value *V, Intrinsic::ID IntrId) {
+     auto *Intr = dyn_cast<IntrinsicInst>(V);
+@@ -99,54 +100,63 @@ struct NVVMRewriter : public PVRewriter<PVType> {
+       const PVId &Id = Obj.getParameter(d);
+       auto *IdValue = Id.getPayloadAs<Value *>();
+ 
+-      switch (getBlockOffsetDim(IdValue)) {
+-      case NVVMDIM_X:
+-        assert(!BlockOffset[0] && "TODO: Handle multiple block "
+-                                               "offsets in the same "
+-                                               "dimension!\n");
+-        BlockOffset[0] = PVId(Id, "nvvm_block_offset_x", IdValue);
+-        Obj.setParameter(d, BlockOffset[0]);
++      NVVMDim Dim =getBlockOffsetDim(IdValue);
++      if (Dim >= NumNVVMDims)
+         continue;
+-      case NVVMDIM_Y:
+-        assert(!BlockOffset[1] && "TODO: Handle multiple block "
+-                                               "offsets in the same "
+-                                               "dimension!\n");
+-        BlockOffset[1] = PVId(Id, "nvvm_block_offset_y", IdValue);
+-        Obj.setParameter(d, BlockOffset[1]);
+-        continue;
+-      case NVVMDIM_Z:
+-        assert(!BlockOffset[2] && "TODO: Handle multiple block "
+-                                               "offsets in the same "
+-                                               "dimension!\n");
+-        BlockOffset[2] = PVId(Id, "nvvm_block_offset_z", IdValue);
+-        Obj.setParameter(d, BlockOffset[2]);
+-        continue;
+-      case NVVMDIM_W:
+-        assert(!BlockOffset[3] && "TODO: Handle multiple block "
+-                                               "offsets in the same "
+-                                               "dimension!\n");
+-        BlockOffset[3] = PVId(Id, "nvvm_block_offset_w", IdValue);
+-        Obj.setParameter(d, BlockOffset[3]);
+-        continue;
+-      case NVVMDIM_NONE:
+-        continue;
+-      }
++
++      assert(!BlockOffset[Dim] && "TODO: Handle multiple block "
++                                              "offsets in the same "
++                                              "dimension!\n");
++      BlockOffset[Dim] =
++          PVId(Id, "nvvm_block_offset_" + NVVMDimNames[Dim], IdValue);
++      Obj.setParameter(d, BlockOffset[Dim]);
+     }
+ 
+     if (!UseGlobalIdx)
+       return;
+ 
++    SmallVector<PVId, 4> ThreadIds;
++    for (const auto &ThreadIdCalls : ThreadIdCallsPerDim)
++      ThreadIds.push_back(ThreadIdCalls.empty() ? PVId() : ThreadIdCalls[0]);
++    rewriteGlobalIdx(Obj, BlockOffset, ThreadIds);
++  }
++
++  void rewriteGlobalIdx(PVSet &Set, ArrayRef<PVId> BlockOffset,
++                        ArrayRef<PVId> ThreadIds) {
++    // TODO
++  }
++
++  void rewriteGlobalIdx(PVMap &Map, ArrayRef<PVId> BlockOffset,
++                        ArrayRef<PVId> ThreadIds) {
++    SmallVector<PVAff, 4> Affs;
++    for (unsigned d = 0, e = Map.getNumOutputDimensions(); d < e ;d++) {
++      Affs.push_back(Map.getPVAffForDim(d));
++      rewriteGlobalIdx(Affs.back(), BlockOffset, ThreadIds);
++    }
++    Map = PVMap(Affs, Map.getOutputId());
++  }
++
++  void rewriteGlobalIdx(PVAff &Aff, ArrayRef<PVId> BlockOffset,
++                        ArrayRef<PVId> ThreadIds) {
+     for (unsigned d = 0; d < NumNVVMDims; d++) {
+-      if (!BlockOffset[d] || ThreadIdCallsPerDim[d].empty())
++      if (!BlockOffset[d] || !ThreadIds[d])
+         continue;
+ 
+-      const PVId &ThreadId = ThreadIdCallsPerDim[d][0];
+-      PVId GlobalIdx = PVId(ThreadId, "nvvm_global_id_x", nullptr);
+-      PVAff Translator(Obj, 0, 1, ThreadId);
+-      Translator.add(PVAff(Obj, 0, 1, BlockOffset[d]));
+-      Translator.equateInputDim(0, GlobalIdx);
+-      Translator.setInputId(Obj.getOutputId());
+-      Obj = Obj.preimage(Translator);
++      const PVId &ThreadId = ThreadIds[d];
++      PVId GlobalIdx =
++          PVId(ThreadId, "nvvm_global_id_" + NVVMDimNames[d], nullptr);
++      PVAff ThreadIdCoeff = Aff.getParameterCoeff(ThreadId);
++      assert(ThreadIdCoeff.isInteger());
++      PVAff BlockOffsetIdCoeff = Aff.getParameterCoeff(BlockOffset[d]);
++      assert(BlockOffsetIdCoeff.isInteger());
++      PVAff MinIdCoeff = ThreadIdCoeff;
++      MinIdCoeff.union_min(BlockOffsetIdCoeff);
++      assert(MinIdCoeff.isInteger());
++
++      Aff = Aff.sub({MinIdCoeff, ThreadId, Aff});
++      Aff = Aff.sub({MinIdCoeff, BlockOffset[d], Aff});
++
++      Aff = Aff.add({MinIdCoeff, GlobalIdx, Aff});
+     }
+ 
+   }
+diff --git a/lib/Analysis/PValue.cpp b/lib/Analysis/PValue.cpp
+index c7fdb9c..74e02bc 100644
+--- a/lib/Analysis/PValue.cpp
++++ b/lib/Analysis/PValue.cpp
+@@ -292,6 +292,26 @@ PVSet &PVSet::unify(const PVSet &S) {
+   return *this;
+ }
+ 
++PVSet &PVSet::neg() {
++  if (Obj)
++    Obj = isl_set_neg(Obj);
++  return *this;
++}
++
++PVSet &PVSet::add(const PVSet &S) {
++  if (!Obj || !S.Obj)
++    return *this;
++  isl_set *SObj = S;
++  unifySetDimensions(Obj, SObj);
++  Obj = isl_set_sum(Obj, SObj);
++  return *this;
++}
++
++PVSet &PVSet::sub(const PVSet &S) {
++  PVSet SCopy = S;
++  return add(SCopy.neg());
++}
++
+ PVSet &PVSet::subtract(const PVSet &S) {
+   if (!Obj)
+     Obj = isl_set_copy(S.Obj);
+@@ -547,6 +567,12 @@ static void adjustDimensionsPlain(isl_map *&Map0, isl_map *&Map1) {
+ 
+ PVMap::PVMap(isl_map *M) : Obj(M) {}
+ PVMap::PVMap(const PVMap &Other) : Obj(isl_map_copy(Other.Obj)) {}
++
++PVMap::PVMap(const PVAff &Coeff, const PVId &Id, const PVBase &Base) {
++  PVAff Aff(Coeff, Id, Base);
++  Obj = isl_map_from_pw_aff(Aff);
++}
++
+ PVMap::PVMap(ArrayRef<PVAff> Affs, const PVId &Id) {
+   if (Affs.empty())
+     return;
+@@ -749,6 +775,13 @@ void PVMap::dropUnusedParameters() {
+   }
+ }
+ 
++PVAff PVMap::getPVAffForDim(unsigned Dim) {
++  isl_pw_multi_aff *PWMA = isl_pw_multi_aff_from_map(isl_map_copy(Obj));
++  isl_pw_aff *PWA = isl_pw_multi_aff_get_pw_aff(PWMA, Dim);
++  isl_pw_multi_aff_free(PWMA);
++  return PWA;
++}
++
+ std::string PVMap::str() const {
+   char *cstr = isl_map_to_str(Obj);
+   if (!cstr)
+@@ -814,6 +847,12 @@ PVAff::PVAff(const PVBase &Base, unsigned CoeffPos, int64_t CoeffVal,
+ 
+ PVAff::PVAff(const PVAff &Other) : Obj(isl_pw_aff_copy(Other.Obj)) {}
+ 
++PVAff::PVAff(const PVAff &Coeff, const PVId &Id, const PVBase &Base)
++    : PVAff(Base, 0, 1, Id) {
++  assert(Coeff.isInteger());
++  multiply(Coeff);
++}
++
+ PVAff::~PVAff() { isl_pw_aff_free(Obj); }
+ 
+ PVAff &PVAff::operator=(const PVAff &Other) {
+@@ -884,6 +923,11 @@ PVId PVAff::getParameter(unsigned No) const {
+   return PVId(isl_pw_aff_get_dim_id(Obj, isl_dim_param, No));
+ }
+ 
++PVAff &PVAff::setParameter(unsigned No, const PVId &Id) {
++  Obj = isl_pw_aff_set_dim_id(Obj, isl_dim_param, No, Id);
++  return *this;
++}
++
+ void PVAff::getParameters(SmallVectorImpl<PVId> &Parameters) const {
+   size_t NumParams = getNumParameters();
+   Parameters.reserve(Parameters.size() + NumParams);
+@@ -907,6 +951,31 @@ int PVAff::getParameterPosition(const PVId &Id) const {
+   return Pos;
+ }
+ 
++void PVAff::eliminateParameter(const PVId &Id) {
++  int Pos = getParameterPosition(Id);
++  assert(Pos >= 0);
++  return eliminateParameter(Pos);
++}
++
++void PVAff::eliminateParameter(unsigned Pos) {
++  Obj = isl_pw_aff_drop_dims(Obj, isl_dim_param, Pos, 1);
++}
++
++void PVAff::equateParameters(unsigned Pos0, unsigned Pos1) {
++  assert(Pos0 < getNumParameters() && Pos1 < getNumParameters());
++  Obj = isl_pw_aff_intersect_params(Obj, isl_set_equate(isl_pw_aff_params(Obj),
++                                                        isl_dim_param, Pos0,
++                                                        isl_dim_param, Pos1));
++}
++
++void PVAff::equateParameters(const PVId &Id0, const PVId &Id1) {
++  int Pos0 = getParameterPosition(Id0);
++  int Pos1 = getParameterPosition(Id1);
++  if (Pos0 < 0 || Pos1 < 0)
++    return;
++  return equateParameters(Pos0, Pos1);
++}
++
+ bool PVAff::involvesId(const PVId &Id) const {
+   return getParameterPosition(Id) >= 0;
+ }
+@@ -1144,6 +1213,11 @@ PVAff &PVAff::union_add(const PVAff &PV) {
+   return *this;
+ }
+ 
++PVAff &PVAff::union_min(const PVAff &PV) {
++  Obj = getCombinatorFn(isl_pw_aff_union_min)(Obj, PV);
++  return *this;
++}
++
+ PVAff &PVAff::select(const PVAff &PV0, const PVAff &PV1) {
+   isl_pw_aff *PV0Obj = PV0;
+   isl_pw_aff *PV1Obj = PV1;
+@@ -1182,9 +1256,9 @@ static isl_stat getParameterAff(isl_set *Domain, isl_aff *Aff, void *User) {
+ PVAff PVAff::getParameterCoeff(const PVId &Id) {
+   int Pos = getParameterPosition(Id);
+   if (Pos < 0)
+-    return PVAff();
++    return PVAff(Id, 0);
+ 
+-  ParameterInfo PI = {PVAff(), Pos};
++  ParameterInfo PI = {PVAff(Id, 0), Pos};
+   isl_stat Success = isl_pw_aff_foreach_piece(Obj, getParameterAff, &PI);
+   (void) Success;
+   assert(Success == isl_stat_ok);
+-- 
+1.8.3.1
+

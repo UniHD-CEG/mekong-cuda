@@ -1,0 +1,28 @@
+From d752207a884f12642ba8f6ec134a9cbf8dda9a71 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Thu, 13 Sep 2018 14:17:37 +0200
+Subject: [PATCH 29/29] Rewrite the bytes access maps
+
+---
+ lib/Analysis/PolyhedralAccessInfo.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index edfb9dc..80be416 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -510,6 +510,11 @@ void PACCSummary::rewrite(PVRewriter<PVMap> &Rewriter) {
+     Rewriter.rewrite(AI->MustWriteMap);
+     Rewriter.rewrite(AI->MayReadMap);
+     Rewriter.rewrite(AI->MustReadMap);
++    for (int i = 0; i < AMK_MAX; ++i) {
++      PVMap &M = AI->AccessMapsBytes[i];
++      if (M)
++        Rewriter.rewrite(M);
++    }
+   }
+ }
+ 
+-- 
+1.8.3.1
+

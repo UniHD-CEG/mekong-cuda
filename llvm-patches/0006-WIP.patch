@@ -1,0 +1,2758 @@
+From d7e83ab7d7827228a6c729a7601f3356770775a3 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Mon, 5 Feb 2018 15:38:45 +0100
+Subject: [PATCH 06/29] WIP
+
+---
+ include/llvm/Analysis/PValue.h                     |  10 +-
+ include/llvm/Analysis/PolyhedralAccessInfo.h       |  65 +-
+ .../llvm/Analysis/PolyhedralExpressionBuilder.h    |   9 +-
+ include/llvm/Analysis/PolyhedralValueInfo.h        |  50 +-
+ include/llvm/InitializePasses.h                    |   1 +
+ include/llvm/LinkAllPasses.h                       |   2 +
+ include/llvm/Transforms/Scalar.h                   |   1 +
+ .../Transforms/Scalar/PolyhedralValueTransformer.h |  90 +++
+ lib/Analysis/PValue.cpp                            | 136 +++-
+ lib/Analysis/PolyhedralAccessInfo.cpp              | 717 +++++++++++++++++----
+ lib/Analysis/PolyhedralExpressionBuilder.cpp       | 218 +++++--
+ lib/Analysis/PolyhedralValueInfo.cpp               | 167 ++++-
+ lib/Transforms/IPO/PassManagerBuilder.cpp          |   1 +
+ lib/Transforms/Scalar/CMakeLists.txt               |   1 +
+ .../Scalar/PolyhedralValueTransformer.cpp          | 396 ++++++++++++
+ lib/Transforms/Scalar/Scalar.cpp                   |   1 +
+ 16 files changed, 1641 insertions(+), 224 deletions(-)
+ create mode 100644 include/llvm/Transforms/Scalar/PolyhedralValueTransformer.h
+ create mode 100644 lib/Transforms/Scalar/PolyhedralValueTransformer.cpp
+
+diff --git a/include/llvm/Analysis/PValue.h b/include/llvm/Analysis/PValue.h
+index 6976ac3..770e6d7 100644
+--- a/include/llvm/Analysis/PValue.h
++++ b/include/llvm/Analysis/PValue.h
+@@ -148,6 +148,8 @@ public:
+   PVSet &operator=(PVSet &&Other);
+   operator bool() const { return Obj != nullptr; }
+ 
++  isl_set * getObj() const;
++
+   /// Return the number of dimensions of this set.
+   size_t getNumInputDimensions() const;
+ 
+@@ -246,6 +248,7 @@ public:
+   operator bool() const { return Obj != nullptr; }
+ 
+   bool isEmpty() const;
++  bool isEqual(const PVMap &Map) const;
+ 
+   /// Return the number of input dimensions of this function.
+   size_t getNumInputDimensions() const;
+@@ -354,9 +357,11 @@ public:
+   bool isComplex() const;
+   bool isInteger() const;
+   bool isConstant() const;
++  bool isEqual(const PVAff &Aff) const;
+ 
+   int getParameterPosition(const PVId &Id) const;
+   bool involvesId(const PVId &Id) const;
++  bool involvesInput(unsigned Dim) const;
+ 
+   void addInputDims(unsigned Dims);
+   void insertInputDims(unsigned Pos, unsigned Dims);
+@@ -395,7 +400,9 @@ public:
+   PVSet nonZeroSet() const;
+ 
+   PVAff getParameterCoeff(const PVId &Id);
+-  PVAff perPiecePHIEvolution(const PVId &Id, int LD) const;
++  PVAff perPiecePHIEvolution(const PVId &Id, int LD,
++                             PVSet &NegationSet) const;
++  PVAff moveOneIteration(unsigned Dim);
+ 
+   /// Use the intersection of the domain with the set @p S as new domain.
+   ///
+@@ -406,6 +413,7 @@ public:
+ 
+   PVAff &simplify(const PVSet &S);
+ 
++  PVSet getEqualDomain(const PVAff &Aff) const;
+   PVSet getLessThanDomain(const PVAff &Aff) const;
+   PVSet getLessEqualDomain(const PVAff &Aff) const;
+   PVSet getGreaterEqualDomain(const PVAff &Aff) const;
+diff --git a/include/llvm/Analysis/PolyhedralAccessInfo.h b/include/llvm/Analysis/PolyhedralAccessInfo.h
+index 854d2c9..e3672ca 100644
+--- a/include/llvm/Analysis/PolyhedralAccessInfo.h
++++ b/include/llvm/Analysis/PolyhedralAccessInfo.h
+@@ -18,9 +18,12 @@
+ #include "llvm/Analysis/PValue.h"
+ #include "llvm/Analysis/PolyhedralUtils.h"
+ 
++#include <set>
++
+ namespace llvm {
+ 
+ class Loop;
++class LoopInfo;
+ class PEXP;
+ class PolyhedralValueInfo;
+ class PolyhedralExpressionBuilder;
+@@ -80,6 +83,12 @@ private:
+ /// look at multiple accesses at once and in a larger scope.
+ class PACCSummary {
+ public:
++
++  struct ArrayInfo;
++  using ArrayInfoMapTy = DenseMap<Value *, ArrayInfo *>;
++  using KnownAccessesTy = SmallVector<const PACC *, 4>;
++  using UnknownInstructionsTy = SmallVector<Instruction *, 4>;
++
+   enum SummaryScopeKind {
+     SSK_EXTERNAL, ///< Accesses accessible outside the code region.
+     SSK_INTERNAL, ///< Accesses accessible inside the code region.
+@@ -99,6 +108,8 @@ public:
+     /// The dimension sizes in case this array has a multidimensional view.
+     SmallVector<const PEXP *, 4> DimensionSizes;
+ 
++    DenseMap<const PACC *, PVMap> AccessMultiDimMap;
++
+     PVMap MayReadMap;
+ 
+     PVMap MustReadMap;
+@@ -106,12 +117,14 @@ public:
+     PVMap MayWriteMap;
+ 
+     PVMap MustWriteMap;
+-  };
+ 
+-  const ArrayInfo *getArrayInfoForPointer(const Value *Pointer) const { return ArrayInfoMap.lookup(Pointer); };
++    void collectParameters(std::set<PVId> &ParameterSet) const;
++    void print(raw_ostream &OS) const;
++  };
+ 
+-  using ArrayInfoMapTy = DenseMap<Value *, ArrayInfo *>;
+-  using UnknownInstructionsTy = SmallVector<Instruction *, 4>;
++  const ArrayInfo *getArrayInfoForPointer(const Value *Pointer) const {
++    return ArrayInfoMap.lookup(Pointer);
++  };
+ 
+   /// Iterator interface for array infos.
+   ///
+@@ -121,21 +134,38 @@ public:
+   const_iterator end() const { return ArrayInfoMap.end(); }
+   ///}
+ 
++  size_t getNumReads() const { return KnownReads.size(); }
++  size_t getNumWrites() const { return KnownWrites.size(); }
+   size_t getNumUnknownReads() const { return UnknownReads.size(); }
+   size_t getNumUnknownWrites() const { return UnknownWrites.size(); }
+ 
++  /// Iterator interface for known read/write instructions.
++  ///
++  ///{
++  using const_inst_iterator = KnownAccessesTy::const_iterator;
++  const_inst_iterator reads_begin() const {
++    return KnownReads.begin();
++  }
++  const_inst_iterator reads_end() const { return KnownReads.end(); }
++  const_inst_iterator writes_begin() const {
++    return KnownWrites.begin();
++  }
++
++  const_inst_iterator writes_end() const { return KnownWrites.end(); }
++  ///}
++
+   /// Iterator interface for unknown read/write instructions.
+   ///
+   ///{
+-  using const_inst_iterator = UnknownInstructionsTy::const_iterator;
+-  const_inst_iterator unknown_reads_begin() const {
++  using const_unknown_inst_iterator = UnknownInstructionsTy::const_iterator;
++  const_unknown_inst_iterator unknown_reads_begin() const {
+     return UnknownReads.begin();
+   }
+-  const_inst_iterator unknown_reads_end() const { return UnknownReads.end(); }
+-  const_inst_iterator unknown_writes_begin() const {
++  const_unknown_inst_iterator unknown_reads_end() const { return UnknownReads.end(); }
++  const_unknown_inst_iterator unknown_writes_begin() const {
+     return UnknownWrites.begin();
+   }
+-  const_inst_iterator unknown_writes_end() const { return UnknownWrites.end(); }
++  const_unknown_inst_iterator unknown_writes_end() const { return UnknownWrites.end(); }
+   ///}
+ 
+   void print(raw_ostream &OS, PolyhedralValueInfo *PVI = nullptr) const;
+@@ -164,9 +194,10 @@ private:
+         : DimensionSizes(DimensionSizes) {}
+   };
+ 
+-  const PEXP *findMultidimensionalViewSize(PolyhedralValueInfo &PI,
+-                                           ArrayRef<const PEXP *> PEXPs,
+-                                           Instruction *&I, const PEXP *&Rem);
++  const PEXP *findMultidimensionalViewSize(
++      PolyhedralValueInfo &PI, ArrayRef<const PEXP *> PEXPs,
++      SmallVectorImpl<std::pair<Instruction *, const PEXP *>>
++          &InstsAndRemainders);
+ 
+   void findMultidimensionalView(PolyhedralValueInfo &PI,
+                                 MultiDimensionalViewInfo &MDVI,
+@@ -178,6 +209,9 @@ private:
+   SummaryScopeKind Kind;
+   const ContainsFuncTy &Contains;
+ 
++  KnownAccessesTy KnownReads;
++  KnownAccessesTy KnownWrites;
++
+   UnknownInstructionsTy UnknownReads;
+   UnknownInstructionsTy UnknownWrites;
+ 
+@@ -196,6 +230,8 @@ class PolyhedralAccessInfo {
+   /// The PolyhedralValueInfo used to get value information.
+   PolyhedralValueInfo &PI;
+ 
++  LoopInfo &LI;
++
+   PolyhedralExpressionBuilder &PEBuilder;
+ 
+   DenseMap<Instruction *, PACC *> AccessMap;
+@@ -204,7 +240,7 @@ class PolyhedralAccessInfo {
+ 
+ public:
+   /// Constructor
+-  PolyhedralAccessInfo(PolyhedralValueInfo &PI);
++  PolyhedralAccessInfo(PolyhedralValueInfo &PI, LoopInfo &LI);
+ 
+   ~PolyhedralAccessInfo();
+ 
+@@ -226,6 +262,9 @@ public:
+   PACCSummary *getAccessSummary(Function &F,
+                                 PACCSummary::SummaryScopeKind Kind);
+ 
++  void extractComputations(Function &F);
++  void detectKnownComputations(Function &F);
++
+   /// Return true if @p PA represents a value that is fixed for one function
+   /// invocation.
+   bool hasFunctionScope(const PACC *PE) const;
+diff --git a/include/llvm/Analysis/PolyhedralExpressionBuilder.h b/include/llvm/Analysis/PolyhedralExpressionBuilder.h
+index 7075c46..c45481d 100644
+--- a/include/llvm/Analysis/PolyhedralExpressionBuilder.h
++++ b/include/llvm/Analysis/PolyhedralExpressionBuilder.h
+@@ -121,16 +121,21 @@ class PolyhedralExpressionBuilder
+   Loop *getLoopForPE(const PEXP *PE);
+ 
+   template <typename PVTy>
+-  void adjustDomainDimensions(PVTy &Obj, const PEXP *OldPE, const PEXP *NewPE,
++  bool  adjustDomainDimensions(PVTy &Obj, const PEXP *OldPE, const PEXP *NewPE,
+                               bool LastIt = false);
+   template <typename PVTy>
+-  void adjustDomainDimensions(PVTy &Obj, Loop *OldL, Loop *NewL,
++  bool adjustDomainDimensions(PVTy &Obj, Loop *OldL, Loop *NewL,
+                               bool LastIt = false);
+ 
+ public:
+   PolyhedralExpressionBuilder(PolyhedralValueInfo &PI)
+       : Scope(nullptr), PI(PI) {}
+ 
++  PolyhedralValueInfoCache& getPolyhedralValueInfoCache() { return PIC; }
++  const PolyhedralValueInfoCache &getPolyhedralValueInfoCache() const {
++    return PIC;
++  }
++
+   /// Assign the combination of @p LHS and @p RHS using @p Combinator to @p PE.
+   ///
+   /// @return True, if the result is affine, false otherwise.
+diff --git a/include/llvm/Analysis/PolyhedralValueInfo.h b/include/llvm/Analysis/PolyhedralValueInfo.h
+index 03a72b2..eff51b6 100644
+--- a/include/llvm/Analysis/PolyhedralValueInfo.h
++++ b/include/llvm/Analysis/PolyhedralValueInfo.h
+@@ -27,6 +27,7 @@
+ 
+ namespace llvm {
+ 
++class Region;
+ class PolyhedralValueInfo;
+ class PolyhedralExpressionBuilder;
+ 
+@@ -336,13 +337,16 @@ public:
+   }
+ 
+   /// Return the polyhedral expression of @p V in @p Scope.
+-  const PEXP *getPEXP(Value *V, Loop *Scope = nullptr) const;
++  const PEXP *getPEXP(Value *V, Loop *Scope = nullptr,
++                      bool Strict = false, bool NoAlias = false) const;
+ 
+   /// Return the domain of @p BB as polyhedral expression in @p Scope.
+-  const PEXP *getDomainFor(BasicBlock *BB, Loop *Scope = nullptr) const;
++  const PEXP *getDomainFor(BasicBlock *BB, Loop *Scope = nullptr,
++                           bool Strict = false, bool NoAlias = false) const;
+ 
+   /// Return the backedge taken count for @p L in @p Scope.
+-  const PEXP *getBackedgeTakenCount(const Loop &L, Loop *Scope = nullptr) const;
++  const PEXP *getBackedgeTakenCount(const Loop &L, Loop *Scope = nullptr,
++                                    bool Strict = false, bool NoAlias = false) const;
+ 
+   /// Return the internal context used.
+   const PVCtx &getCtx() const { return Ctx; }
+@@ -376,26 +380,50 @@ public:
+   /// @param Scope  The scope to be checked.
+   /// @param Strict Flag to indicate that parameters cannot be in the @p Scope
+   ///               even if they do not vary for one iteration of the @p Scope.
+-  bool isVaryingInScope(Instruction &I, Loop *Scope, bool Strict) const;
++  bool isVaryingInScope(Instruction &I, const Region &RegionScope, bool Strict,
++                        bool NoAlias = false) const;
++  /// Return true if @p I is (potentialy) varying in @p Scope.
++  ///
++  /// @param I      The instruction to be checked.
++  /// @param Scope  The scope to be checked.
++  /// @param Strict Flag to indicate that parameters cannot be in the @p Scope
++  ///               even if they do not vary for one iteration of the @p Scope.
++  bool isVaryingInScope(Instruction &I, Loop *Scope, bool Strict,
++                        bool NoAlias = false) const;
++
++  /// Return true if @p V is fixed for one iteration of @p Scope. If @p Strict
++  /// is set, @p V does not depend on any instructions in @p Scope, otherwise it
++  /// can if the instructions have a fixed, thus unchanging, value in one
++  /// iteration of @p Scope.
++  bool hasScope(Value &V, const Region &RegionScope, bool Strict,
++                bool NoAlias = false) const;
++
++  /// Return true if @p V is fixed for one iteration of @p Scope. If @p Strict
++  /// is set, @p V does not depend on any instructions in @p Scope, otherwise it
++  /// can if the instructions have a fixed, thus unchanging, value in one
++  /// iteration of @p Scope.
++  bool hasScope(const PEXP *PE, const Region &RegionScope, bool Strict,
++                bool NoAlias = false) const;
++
+ 
+   /// Return true if @p V is fixed for one iteration of @p Scope. If @p Strict
+   /// is set, @p V does not depend on any instructions in @p Scope, otherwise it
+   /// can if the instructions have a fixed, thus unchanging, value in one
+   /// iteration of @p Scope.
+-  bool hasScope(Value &V, Loop *Scope, bool Strict) const;
++  bool hasScope(Value &V, Loop *Scope, bool Strict, bool NoAlias = false) const;
+ 
+   /// Return true if @p PE represents a value that is fixed for one iteration of
+   /// @p Scope. If @p Strict is set, @p PE is not parametric in an
+   /// instruction in @p Scope, otherwise it can be if the instructions have a
+   /// fixed, thus unchanging, value in one iteration of @p Scope.
+-  bool hasScope(const PEXP *PE, Loop *Scope, bool Strict) const;
++  bool hasScope(const PEXP *PE, Loop *Scope, bool Strict, bool NoAlias = false) const;
+ 
+   /// Return true if @p PE represents a value that is fixed for one function
+   /// invocation. If @p Strict is set, @p PE is not parametric in any
+   /// instruction, otherwise it can be if the instructions have a fixed,
+   /// thus unchanging, value in one function invocation.
+-  bool hasFunctionScope(const PEXP *PE, bool Strict) const {
+-    return hasScope(PE, nullptr, Strict);
++  bool hasFunctionScope(const PEXP *PE, bool Strict, bool NoAlias = false) const {
++    return hasScope(PE, nullptr, Strict, NoAlias);
+   }
+ 
+   unsigned getNumPieces(const PEXP *PE) const;
+@@ -406,10 +434,12 @@ public:
+   bool mayBeInfinite(Loop &L) const;
+ 
+   /// Return the unknown ids referenced by @p PE  in @p Values.
+-  void getParameters(const PEXP *PE, SmallVectorImpl<PVId> &Values) const;
++  void getParameters(const PEXP *PE, SmallVectorImpl<PVId> &Values,
++                     bool Recursive = true) const;
+ 
+   /// Return the unknown values referenced by @p PE  in @p Values.
+-  void getParameters(const PEXP *PE, SmallVectorImpl<Value *> &Values) const;
++  void getParameters(const PEXP *PE, SmallVectorImpl<Value *> &Values,
++                     bool Recursive = true) const;
+ 
+   /// Return true if the @p Pred relation between @p LHS and @p RHS is known to
+   /// hold at @p IP with regards to @p Scope.
+diff --git a/include/llvm/InitializePasses.h b/include/llvm/InitializePasses.h
+index 4a2e25d..abf006c 100644
+--- a/include/llvm/InitializePasses.h
++++ b/include/llvm/InitializePasses.h
+@@ -289,6 +289,7 @@ void initializePhysicalRegisterUsageInfoPass(PassRegistry&);
+ void initializePlaceBackedgeSafepointsImplPass(PassRegistry&);
+ void initializePlaceSafepointsPass(PassRegistry&);
+ void initializePolyhedralValueInfoWrapperPassPass(PassRegistry&);
++void initializePolyhedralValueTransformerWrapperPassPass(PassRegistry&);
+ void initializePolyhedralAccessInfoWrapperPassPass(PassRegistry&);
+ void initializePolyhedralDependenceInfoWrapperPassPass(PassRegistry&);
+ void initializePostDomOnlyPrinterPass(PassRegistry&);
+diff --git a/include/llvm/LinkAllPasses.h b/include/llvm/LinkAllPasses.h
+index fd55e14..523c808 100644
+--- a/include/llvm/LinkAllPasses.h
++++ b/include/llvm/LinkAllPasses.h
+@@ -48,6 +48,7 @@
+ #include "llvm/Transforms/ObjCARC.h"
+ #include "llvm/Transforms/Scalar.h"
+ #include "llvm/Transforms/Scalar/GVN.h"
++#include "llvm/Transforms/Scalar/PolyhedralValueTransformer.h"
+ #include "llvm/Transforms/Utils/SymbolRewriter.h"
+ #include "llvm/Transforms/Utils/UnifyFunctionExitNodes.h"
+ #include "llvm/Transforms/Vectorize.h"
+@@ -144,6 +145,7 @@ namespace {
+       (void) llvm::createDemoteRegisterToMemoryPass();
+       (void) llvm::createPruneEHPass();
+       (void) llvm::createPolyhedralValueInfoWrapperPass();
++      (void) llvm::createPolyhedralValueTransformerWrapperPass();
+       (void) llvm::createPolyhedralAccessInfoWrapperPass();
+       (void) llvm::createPolyhedralDependenceInfoWrapperPass();
+       (void) llvm::createPostDomOnlyPrinterPass();
+diff --git a/include/llvm/Transforms/Scalar.h b/include/llvm/Transforms/Scalar.h
+index 49186bc..a40139e 100644
+--- a/include/llvm/Transforms/Scalar.h
++++ b/include/llvm/Transforms/Scalar.h
+@@ -592,6 +592,7 @@ FunctionPass *createLibCallsShrinkWrapPass();
+ FunctionPass *createEntryExitInstrumenterPass();
+ FunctionPass *createPostInlineEntryExitInstrumenterPass();
+ 
++FunctionPass *createPolyhedralValueTransformerWrapperPass();
+ } // End llvm namespace
+ 
+ #endif
+diff --git a/include/llvm/Transforms/Scalar/PolyhedralValueTransformer.h b/include/llvm/Transforms/Scalar/PolyhedralValueTransformer.h
+new file mode 100644
+index 0000000..6d62ac7
+--- /dev/null
++++ b/include/llvm/Transforms/Scalar/PolyhedralValueTransformer.h
+@@ -0,0 +1,90 @@
++//===--- PolyhedralValueTransformer.h -- Polyhedral access analysis ---*- C++ -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef POLYHEDRAL_VALUE_TRANSFORMER_H
++#define POLYHEDRAL_VALUE_TRANSFORMER_H
++
++#include "llvm/Analysis/AliasAnalysis.h"
++#include "llvm/IR/Instructions.h"
++#include "llvm/IR/PassManager.h"
++#include "llvm/Pass.h"
++
++namespace llvm {
++
++class Loop;
++class LoopInfo;
++class PEXP;
++class PolyhedralValueInfo;
++
++class PolyhedralValueTransformer {
++
++  /// The PolyhedralValueInfo used to get value information.
++  PolyhedralValueInfo &PVI;
++
++  AliasAnalysis &AA;
++
++  LoopInfo &LI;
++
++public:
++  /// Constructor
++  PolyhedralValueTransformer(PolyhedralValueInfo &PVI, AliasAnalysis &AA,
++                             LoopInfo &LI);
++
++  ~PolyhedralValueTransformer();
++
++  bool hoistConditions(Loop &L);
++  bool hoistConditions();
++
++  bool checkExpressions(Loop &L);
++  bool checkExpressions();
++
++  bool checkLoopIdioms(Loop &L);
++  bool checkLoopIdioms();
++
++  /// Clear all cached information.
++  void releaseMemory();
++
++  PolyhedralValueInfo &getPolyhedralValueInfo() { return PVI; }
++
++  /// Print some statistics to @p OS.
++  void print(raw_ostream &OS) const;
++
++  void dump() const;
++};
++
++/// Wrapper pass for PolyhedralValueTransformer on a per-function basis.
++class PolyhedralValueTransformerWrapperPass : public FunctionPass {
++  PolyhedralValueTransformer *PVT;
++  Function *F;
++
++public:
++  static char ID;
++  PolyhedralValueTransformerWrapperPass() : FunctionPass(ID) {}
++
++  /// Return the PolyhedralValueTransformer object for the current function.
++  PolyhedralValueTransformer &getPolyhedralValueTransformer() {
++    assert(PVT);
++    return *PVT;
++  }
++
++  /// @name Pass interface
++  //@{
++  virtual void getAnalysisUsage(AnalysisUsage &AU) const override;
++  virtual void releaseMemory() override;
++  virtual bool runOnFunction(Function &F) override;
++  //@}
++
++  virtual void print(raw_ostream &OS, const Module *) const override;
++  void dump() const;
++};
++
++} // namespace llvm
++#endif
+diff --git a/lib/Analysis/PValue.cpp b/lib/Analysis/PValue.cpp
+index bf9f208..c7fdb9c 100644
+--- a/lib/Analysis/PValue.cpp
++++ b/lib/Analysis/PValue.cpp
+@@ -196,6 +196,8 @@ PVSet &PVSet::operator=(PVSet &&Other) {
+ 
+ PVSet::operator isl_set *() const { return isl_set_copy(Obj); }
+ 
++isl_set * PVSet::getObj() const { return *this; }
++
+ isl_ctx *PVSet::getIslCtx() const { return isl_set_get_ctx(Obj); }
+ 
+ isl_space *PVSet::getSpace() const { return isl_set_get_space(Obj); }
+@@ -417,6 +419,10 @@ PVSet &PVSet::maxInLastInputDims(unsigned Dims) {
+   unsigned NumDims = getNumInputDimensions();
+   assert(NumDims >= Dims);
+   Obj = isl_set_project_out(Obj, isl_dim_set, 0, NumDims - Dims);
++  if (!isl_set_is_bounded(Obj)) {
++    Obj = isl_set_free(Obj);
++    return *this;
++  }
+   Obj = isl_set_lexmax(Obj);
+   Obj = isl_set_insert_dims(Obj, isl_dim_set, 0, NumDims - Dims);
+   return *this;
+@@ -599,6 +605,10 @@ isl_space *PVMap::getSpace() const { return isl_map_get_space(Obj); }
+ 
+ bool PVMap::isEmpty() const { return Obj && isl_map_is_empty(Obj); }
+ 
++bool PVMap::isEqual(const PVMap &Map) const {
++  return Obj && Map && isl_map_is_equal(Obj, Map);
++}
++
+ size_t PVMap::getNumInputDimensions() const { return isl_map_dim(Obj, isl_dim_in); }
+ 
+ size_t PVMap::getNumOutputDimensions() const { return isl_map_dim(Obj, isl_dim_out); }
+@@ -901,6 +911,11 @@ bool PVAff::involvesId(const PVId &Id) const {
+   return getParameterPosition(Id) >= 0;
+ }
+ 
++bool PVAff::involvesInput(unsigned Dim) const {
++  assert(Dim <= getNumInputDimensions());
++  return isl_pw_aff_involves_dims(Obj, isl_dim_in, Dim, 1);
++}
++
+ void PVAff::addInputDims(unsigned Dims) {
+   Obj = isl_pw_aff_add_dims(Obj, isl_dim_in, Dims);
+ }
+@@ -974,6 +989,18 @@ bool PVAff::isConstant() const {
+   return isl_pw_aff_is_cst(Obj);
+ }
+ 
++bool PVAff::isEqual(const PVAff &Aff) const {
++  isl_pw_aff *AffPWA = isl_pw_aff_add_dims(
++      Aff, isl_dim_in, getNumInputDimensions() - Aff.getNumInputDimensions());
++  return isl_pw_aff_is_equal(Obj, AffPWA);
++}
++
++PVSet PVAff::getEqualDomain(const PVAff &Aff) const {
++  isl_pw_aff *AffPWA = isl_pw_aff_add_dims(
++      Aff, isl_dim_in, getNumInputDimensions() - Aff.getNumInputDimensions());
++  return isl_pw_aff_eq_set(isl_pw_aff_copy(Obj), AffPWA);
++}
++
+ PVSet PVAff::getLessThanDomain(const PVAff &Aff) const {
+   isl_pw_aff *AffPWA = isl_pw_aff_add_dims(
+       Aff, isl_dim_in, getNumInputDimensions() - Aff.getNumInputDimensions());
+@@ -1170,55 +1197,80 @@ struct EvolutionInfo {
+   int LD;
+   int Pos;
+   long Val;
++  PVSet &NegationSet;
+ };
+ 
+-static isl_stat adjustBackedgeVal(isl_set *Domain, isl_aff *Aff, void *User) {
++static isl_stat adjustBackedgeVal(isl_set *D, isl_aff *Aff, void *User) {
++  PVSet Domain(D);
+   auto *EI = static_cast<EvolutionInfo*>(User);
+-  auto *Val = isl_aff_get_constant_val(Aff);
+-  if (isl_val_is_zero(Val) || isl_val_get_den_si(Val) != 1) {
+-    isl_val_free(Val);
+-    isl_set_free(Domain);
++  auto *ConstantVal = isl_aff_get_constant_val(Aff);
++  if (isl_val_get_den_si(ConstantVal) != 1) {
++    isl_val_free(ConstantVal);
+     isl_aff_free(Aff);
+     return isl_stat_error;
+   }
+-  //long ValL = isl_val_get_num_si(Val);
+-  //if (EI->Val != LONG_MAX && EI->Val != ValL) {
+-    //isl_val_free(Val);
+-    //isl_set_free(Domain);
+-    //isl_aff_free(Aff);
+-    //return isl_stat_error;
+-  //}
+-  //EI->Val = ValL;
+-
+-  // Aff = isl_aff_set_constant_val(Aff, isl_val_neg(isl_val_copy(Val)));
+-  Aff = isl_aff_set_constant_si(Aff, 0);
+-  Aff = isl_aff_add_dims(Aff, isl_dim_in, EI->LD + 1);
+-  Aff = isl_aff_set_coefficient_val(Aff, isl_dim_in, EI->LD, Val);
+-
+   auto *PosVal = isl_aff_get_coefficient_val(Aff, isl_dim_param, EI->Pos);
+-  if (!isl_val_is_one(PosVal)) {
+-    isl_val_free(Val);
+-    isl_set_free(Domain);
++  if (isl_val_is_zero(PosVal)) {
++    isl_val_free(ConstantVal);
++    EI->PWA.union_add(PVAff(isl_pw_aff_from_aff(Aff)).intersectDomain(Domain));
++    return isl_stat_ok;
++  }
++  if (!isl_val_is_one(PosVal) && !isl_val_is_negone(PosVal)) {
++    isl_val_free(ConstantVal);
+     isl_aff_free(Aff);
+     return isl_stat_error;
+   }
+-  Aff = isl_aff_set_coefficient_si(Aff, isl_dim_param, EI->Pos, 0);
+-
+-  Domain = isl_set_drop_constraints_involving_dims(Domain, isl_dim_param,
+-                                                   EI->Pos, 1);
++  //long ValL = isl_val_get_num_si(ConstantVal);
++  //if (EI->ConstantVal != LONG_MAX && EI->ConstantVal != ValL) {
++    //isl_val_free(ConstantVal);
++    //isl_aff_free(Aff);
++    //return isl_stat_error;
++  //}
++  //EI->ConstantVal = ValL;
++
++  Aff = isl_aff_drop_dims(Aff, isl_dim_param, EI->Pos, 1);
++  assert(isl_aff_dim(Aff, isl_dim_in) < EI->LD + 1);
++  Aff = isl_aff_add_dims(Aff, isl_dim_in,
++                         EI->LD + 1 - isl_aff_dim(Aff, isl_dim_in));
++  assert(Domain.getNumInputDimensions() < EI->LD + 1);
++  Domain.addInputDims(EI->LD + 1 - Domain.getNumInputDimensions());
++  Domain.projectParameter(Domain.getParameter(EI->Pos));
++  if (isl_val_is_one(PosVal)) {
++    // Aff = isl_aff_set_constant_val(Aff, isl_val_neg(isl_val_copy(ConstantVal)));
++    Aff = isl_aff_set_constant_si(Aff, 0);
++    Aff = isl_aff_add_coefficient_val(Aff, isl_dim_in, EI->LD, ConstantVal);
++    PVAff Increment = isl_pw_aff_from_aff(Aff);
++    Increment.intersectDomain(Domain);
++    EI->PWA.union_add(Increment);
++  } else {
++    isl_val_free(ConstantVal);
++    assert(isl_val_is_negone(PosVal));
++    auto *LSpace = isl_aff_get_domain_local_space(Aff);
++    auto *ModAff = isl_aff_zero_on_domain(LSpace);
++    ModAff = isl_aff_set_coefficient_si(ModAff, isl_dim_in, EI->LD, 1);
++    ModAff = isl_aff_mod_val(ModAff,
++                              isl_val_int_from_si(isl_aff_get_ctx(ModAff), 2));
++    PVSet EvenSet(isl_set_from_basic_set(isl_aff_zero_basic_set(ModAff)));
++    EvenSet.intersect(Domain);
++    PVSet OddSet(Domain);
++    OddSet.subtract(EvenSet);
++    EI->NegationSet.unify(OddSet);
++    PVAff OddAff = isl_pw_aff_from_aff(isl_aff_neg(Aff));
++    OddAff.intersectDomain(OddSet);
++    PVAff EvenAff(EvenSet, 0);
++    EI->PWA.union_add(EvenAff);
++    EI->PWA.union_add(OddAff);
++  }
+ 
+-  PVAff Increment = isl_pw_aff_from_aff(Aff);
+-  Increment.intersectDomain(Domain);
+-  EI->PWA.union_add(Increment);
+   return isl_stat_ok;
+ }
+ 
+-PVAff PVAff::perPiecePHIEvolution(const PVId &Id, int LD) const {
++PVAff PVAff::perPiecePHIEvolution(const PVId &Id, int LD, PVSet &NegationSet) const {
+   int Pos = getParameterPosition(Id);
+   if (Pos < 0)
+-    return PVAff();
++    return *this;
+ 
+-  EvolutionInfo EI = {PVAff(), LD, Pos, LONG_MAX};
++  EvolutionInfo EI = {PVAff(), LD, Pos, LONG_MAX, NegationSet};
+   isl_stat Success = isl_pw_aff_foreach_piece(Obj, adjustBackedgeVal, &EI);
+   if (Success != isl_stat_ok)
+     return PVAff();
+@@ -1226,6 +1278,26 @@ PVAff PVAff::perPiecePHIEvolution(const PVId &Id, int LD) const {
+   return EI.PWA;
+ }
+ 
++struct IterationMoveInfo {
++  PVAff PWA;
++  unsigned Dim;
++};
++
++static isl_stat movePieceOneIteration(isl_set *D, isl_aff *Aff, void *User) {
++  auto *IMI = static_cast<IterationMoveInfo *>(User);
++  PVSet Domain(D);
++  Domain.getNextIteration(IMI->Dim);
++  IMI->PWA.union_add(PVAff(isl_pw_aff_from_aff(Aff)).intersectDomain(Domain));
++  return isl_stat_ok;
++}
++
++PVAff PVAff::moveOneIteration(unsigned Dim) {
++  IterationMoveInfo IMI = {PVAff(), Dim};
++  isl_stat Success = isl_pw_aff_foreach_piece(Obj, movePieceOneIteration, &IMI);
++  assert(Success == isl_stat_ok);
++  return IMI.PWA;
++}
++
+ PVAff PVAff::getExpPWA(const PVAff &PWA) {
+   assert(isl_pw_aff_is_cst(PWA));
+ 
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 627f23d..94e35f3 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -13,11 +13,13 @@
+ #include "llvm/Analysis/PolyhedralAccessInfo.h"
+ 
+ #include "llvm/ADT/Statistic.h"
++#include "llvm/ADT/STLExtras.h"
+ #include "llvm/Analysis/LoopInfo.h"
+ #include "llvm/Analysis/Passes.h"
+ #include "llvm/Analysis/PolyhedralExpressionBuilder.h"
+ #include "llvm/Analysis/PolyhedralValueInfo.h"
+ #include "llvm/Analysis/PostDominators.h"
++#include "llvm/Analysis/ValueTracking.h"
+ #include "llvm/IR/Dominators.h"
+ #include "llvm/IR/InstVisitor.h"
+ #include "llvm/IR/Instructions.h"
+@@ -87,10 +89,10 @@ static uint64_t getElementSize(Value *Pointer, const DataLayout &DL) {
+   return DL.getTypeStoreSize(PointerTy->getPointerElementType());
+ }
+ 
+-const PEXP *
+-PACCSummary::findMultidimensionalViewSize(PolyhedralValueInfo &PI,
+-                                          ArrayRef<const PEXP *> PEXPs,
+-                                          Instruction *&I, const PEXP *&Rem) {
++const PEXP *PACCSummary::findMultidimensionalViewSize(
++    PolyhedralValueInfo &PI, ArrayRef<const PEXP *> PEXPs,
++    SmallVectorImpl<std::pair<Instruction *, const PEXP *>>
++        &InstsAndRemainders) {
+ 
+   if (PEXPs.empty())
+     return nullptr;
+@@ -101,28 +103,32 @@ PACCSummary::findMultidimensionalViewSize(PolyhedralValueInfo &PI,
+       dbgs() << "\t - " << PE->getPWA() << " [" << *PE->getValue() << "]\n";
+   });
+ 
+-  SmallPtrSet<Value *, 4> ExprParameterSet, DomainParameterSet;
++  SmallPtrSet<Value *, 4> DomainParameterSet;
++  DenseMap<Value *, SmallVector<const PEXP*, 4>> ExprParameterMap;
+   SmallVector<Value *, 4> ParameterVector;
+   for (const PEXP *PE : PEXPs) {
+     ParameterVector.clear();
+     PE->getPWA().getParameters(ParameterVector);
+-    ExprParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
++    for (Value *Parameter : ParameterVector)
++      ExprParameterMap[Parameter].push_back(PE);
+     ParameterVector.clear();
+ 
+     PE->getDomain().getParameters(ParameterVector);
+     DomainParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
+   }
+ 
+-  DEBUG(dbgs() << "Found " << ExprParameterSet.size()
++  DEBUG(dbgs() << "Found " << ExprParameterMap.size()
+                << " expression parameters\nFound " << DomainParameterSet.size()
+                << " domain parameters\n");
+ 
+   for (Value *V : DomainParameterSet)
+-    ExprParameterSet.erase(V);
++    ExprParameterMap.erase(V);
+ 
+-  DenseMap<Value *, SmallVector<std::pair<Instruction *, const PEXP *>, 4>>
++  DenseMap<const PEXP *, SmallVector<std::pair<Instruction *, const PEXP *>, 4>>
+       PotentialSizes;
+-  for (Value *V : ExprParameterSet) {
++
++  for (auto &It : ExprParameterMap) {
++    Value *V = It.first;
+     auto *I = dyn_cast<Instruction>(V);
+     if (!I) {
+       DEBUG(dbgs() << "\tSkip non instruction: " << *V << "\n");
+@@ -141,47 +147,65 @@ PACCSummary::findMultidimensionalViewSize(PolyhedralValueInfo &PI,
+     const PEXP *OpPE0 = PI.getPEXP(Op0, Scope);
+     const PEXP *OpPE1 = PI.getPEXP(Op1, Scope);
+ 
+-    if (PI.isUnknown(OpPE0))
+-      PotentialSizes[Op0].push_back(std::make_pair(I, PI.getPEXP(Op1, Scope)));
+-    if (PI.isUnknown(OpPE1))
+-      PotentialSizes[Op1].push_back(std::make_pair(I, PI.getPEXP(Op0, Scope)));
++    if (PI.isUnknown(OpPE0) && OpPE0->getPWA().getNumInputDimensions() == 0)
++      PotentialSizes[OpPE0].push_back({I, OpPE1});
++    if (PI.isUnknown(OpPE1) && OpPE1->getPWA().getNumInputDimensions() == 0)
++      PotentialSizes[OpPE1].push_back({I, OpPE0});
++  }
++
++  // TODO Look for loop bounds, etc.
++  for (const PEXP *PE : PEXPs) {
++
+   }
+ 
+-  DEBUG(dbgs() << "Found " << PotentialSizes.size() << " potential sizes\n");
++  DEBUG({
++    dbgs() << "Found " << PotentialSizes.size() << " potential sizes:\n";
++    for (auto &It : PotentialSizes) {
++      dbgs() << "- " << It.first << " : " << It.second.size() << "\n";
++    }
++  });
++
+   if (PotentialSizes.empty()) {
+     return nullptr;
+   }
+ 
+-  Value *PotentialSize = nullptr;
++  const PEXP *PotentialSize = nullptr;
+   if (PotentialSizes.size()  == 1)
+-    PotentialSize = PotentialSizes.begin()->getFirst();
++    PotentialSize = PotentialSizes.begin()->first;
+   else {
+     for (auto &It : PotentialSizes) {
+-      if (It.second.size() > 1)
+-        continue;
+       ParameterVector.clear();
+-      PI.getParameters(PI.getPEXP(It.first, Scope), ParameterVector);
+-      if (!std::all_of(ParameterVector.begin(), ParameterVector.end(),
++      PI.getParameters(It.first, ParameterVector);
++      if (ParameterVector.empty() ||
++          !std::all_of(ParameterVector.begin(), ParameterVector.end(),
+                        [](Value *P) { return isa<Argument>(P); }))
+         continue;
+-      if (PotentialSize)
++      if (!PotentialSize) {
++        PotentialSize = It.first;
++        continue;
++      }
++
++      if (!PotentialSize->getPWA().isEqual(It.first->getPWA()))
+         return nullptr;
+-      PotentialSize = It.first;
++      PotentialSizes[PotentialSize].append(It.second.begin(), It.second.end());
+     }
+   }
+ 
++  DEBUG({
++    if (PotentialSize)
++      dbgs() << "Potential size: " << PotentialSize << "\n";
++    else
++      dbgs() << "No potential size found!\n";
++  });
++
+   if (!PotentialSize) {
+     DEBUG(dbgs() << "TODO: choose potential size!\n");
+     return nullptr;
+   }
+-  if (PotentialSizes[PotentialSize].size() != 1) {
+-    DEBUG(dbgs() << "TODO: this is a hack!\n");
+-    return nullptr;
+-  }
+ 
+-  I = PotentialSizes[PotentialSize].front().first;
+-  Rem = PotentialSizes[PotentialSize].front().second;
+-  return PI.getPEXP(PotentialSize, Scope);
++  for (auto &It : PotentialSizes[PotentialSize])
++    InstsAndRemainders.push_back(It);
++  return PotentialSize;
+ }
+ 
+ void PACCSummary::findMultidimensionalView(PolyhedralValueInfo &PI,
+@@ -195,27 +219,29 @@ void PACCSummary::findMultidimensionalView(PolyhedralValueInfo &PI,
+   for (auto *PA : PACCs)
+     PEXPs.push_back(PA->getPEXP());
+ 
+-  Instruction *I;
+-  const PEXP *Rem;
++  SmallVector<std::pair<Instruction *, const PEXP *>, 8> InstsAndRemainders;
+   while (1) {
+-    const PEXP *DimSize = findMultidimensionalViewSize(PI, PEXPs, I, Rem);
++    const PEXP *DimSize =
++        findMultidimensionalViewSize(PI, PEXPs, InstsAndRemainders);
+     DEBUG(dbgs() << "DimSize: " << DimSize << "\n");
+     if (!DimSize)
+       return;
+ 
+-    assert(I && Rem);
++    PEXPs.clear();
++
+     MDVI.DimensionSizes.push_back(DimSize);
+     unsigned CurDim = MDVI.DimensionSizes.size();
+-    auto &DimInfo = MDVI.DimensionInstsMap[I];
+-    if (!DimInfo.second)
+-      DimInfo = std::make_pair(CurDim, Rem);
+-    else {
+-      assert(DimInfo.second == Rem);
+-      DimInfo.first = std::max(DimInfo.first, CurDim);
++    for (auto &InstAndRemainder : InstsAndRemainders) {
++      auto &DimInfo = MDVI.DimensionInstsMap[InstAndRemainder.first];
++      PEXPs.push_back(InstAndRemainder.second);
++      if (!DimInfo.second)
++        DimInfo = std::make_pair(CurDim, InstAndRemainder.second);
++      else {
++        assert(DimInfo.second == InstAndRemainder.second);
++        DimInfo.first = std::max(DimInfo.first, CurDim);
++      }
+     }
+ 
+-    PEXPs.clear();
+-    PEXPs.push_back(Rem);
+   }
+ }
+ 
+@@ -267,16 +293,18 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+       SmallVector<PVAff, 4> DimPWAs;
+       DEBUG(dbgs() << "\n\nPWA:" << PWA << "\n");
+ 
+-      SmallVector<std::pair<Instruction *, const PEXP *>, 4> Dimensions;
++      SmallVector<SmallVector<std::pair<Instruction *, const PEXP *>, 4>, 4>
++          Dimensions;
+       Dimensions.resize(MDVI.DimensionSizes.size());
+       for (const auto &It : MDVI.DimensionInstsMap) {
+         assert(It.second.first > 0);
+         unsigned Dim = It.second.first - 1;
+         DEBUG(dbgs() << "Dim: " << Dim << "\nInst: " << *It.first << "\n");
+         auto &DimInfo = Dimensions[Dim];
+-        assert(DimInfo.first == nullptr && DimInfo.second == nullptr);
+-        DimInfo.first = It.first;
+-        DimInfo.second = It.second.second;
++        //assert(DimInfo.first == nullptr && DimInfo.second == nullptr);
++        //DimInfo.first = It.first;
++        //DimInfo.second = It.second.second;
++        DimInfo.push_back({It.first, It.second.second});
+       }
+ 
+       DimPWAs.resize(Dimensions.size() + 1);
+@@ -289,36 +317,41 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+       for (int Dim = 0; Dim < LastDim; Dim++) {
+         DEBUG(dbgs() << "Dim: " << Dim << "\n");
+         auto &DimInfo = Dimensions[Dim];
+-        assert(DimInfo.first && DimInfo.second);
++        assert(DimInfo.size());
+ 
+-        PVId PId = PI.getParameterId(*DimInfo.first);
+         PVAff &LastPWA = DimPWAs[LastDim - Dim];
+         DEBUG(dbgs() << "LastPWA: " << LastPWA << "\n");
+ 
+-        PVAff Coeff = LastPWA.getParameterCoeff(PId);
+-        DEBUG(dbgs() << "Coeff " << Coeff << "\n");
+-        assert(Coeff && "TODO: Handle missing coeff!");
+-        assert(Coeff.isConstant());
+-
+-        PVAff &DimPWA = DimPWAs[LastDim - Dim - 1];
+-        assert(!DimPWA);
+-
+-        DEBUG(dbgs() << "Rem: " << DimInfo.second->getPWA() << "\n";);
+-        DimPWA = DimInfo.second->getPWA();
+-        DimPWA.multiply(Coeff);
+-
+-        const PVAff &Size = AI->DimensionSizes[Dim]->getPWA();
+-        DEBUG(dbgs() << "Size: " << Size << "\n");
+-        PVAff SizeFactor = LastPWA.extractFactor(Size);
+-        DEBUG(dbgs() << "SizeFactor: " << SizeFactor << "\n");
+-        if (SizeFactor) {
+-          DimPWA.add(SizeFactor);
+-          LastPWA.sub(SizeFactor.multiply(Size));
+-        }
+-        LastPWA.sub(Coeff.multiply(PVAff(PId)));
++        for (auto &It : DimInfo) {
++          DEBUG(dbgs() << "DimInfoIt: " << *It.first << " => " << It.second
++                       << "\n");
++          PVId PId = PI.getParameterId(*It.first);
++          PVAff Coeff = LastPWA.getParameterCoeff(PId);
++          DEBUG(dbgs() << "Coeff " << Coeff << "\n");
++          assert(!Coeff || Coeff.isConstant());
++          if (!Coeff)
++            continue;
+ 
+-        DEBUG(dbgs() << "Dim: " << Dim << " => " << DimPWA << " [" << LastPWA
+-                     << "]\n");
++          PVAff &DimPWA = DimPWAs[LastDim - Dim - 1];
++          assert(!DimPWA);
++
++          DEBUG(dbgs() << "Rem: " << It.second->getPWA() << "\n";);
++          DimPWA = It.second->getPWA();
++          DimPWA.multiply(Coeff);
++
++          const PVAff &Size = AI->DimensionSizes[Dim]->getPWA();
++          DEBUG(dbgs() << "Size: " << Size << "\n");
++          PVAff SizeFactor = LastPWA.extractFactor(Size);
++          DEBUG(dbgs() << "SizeFactor: " << SizeFactor << "\n");
++          if (SizeFactor) {
++            DimPWA.add(SizeFactor);
++            LastPWA.sub(SizeFactor.multiply(Size));
++          }
++          LastPWA.sub(Coeff.multiply(PVAff(PId)));
++
++          DEBUG(dbgs() << "Dim: " << Dim << " => " << DimPWA << " [" << LastPWA
++                       << "]\n");
++        }
+       }
+ 
+       PVMap Map(DimPWAs, PA->getId());
+@@ -342,6 +375,8 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+       }
+       DEBUG(dbgs() << "Final MAP: " << Map << "\n");
+ 
++      AI->AccessMultiDimMap[PA] = Map;
++
+       if (PA->isWrite()) {
+         if (IsMayAccess)
+           AI->MayWriteMap.union_add(Map);
+@@ -394,37 +429,10 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+   OS << "Array infos:\n";
+   for (auto AIt : *this) {
+     Value *BasePointer = AIt.first;
+-    ArrayInfo *AI = AIt.second;
+-
+-    ParameterVector.clear();
+-    AI->MustWriteMap.getParameters(ParameterVector);
+-    ParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
+-    ParameterVector.clear();
+-    AI->MustReadMap.getParameters(ParameterVector);
+-    ParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
+-    ParameterVector.clear();
+-    AI->MayWriteMap.getParameters(ParameterVector);
+-    ParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
+-    ParameterVector.clear();
+-    AI->MayReadMap.getParameters(ParameterVector);
+-    ParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
+-
+     OS << "\tBase pointer: " << (BasePointer ? BasePointer->getName() : "<n/a>")
+        << "\n";
+-    if (!AI->DimensionSizes.empty()) {
+-      OS << "\t\tDimension sizes:\n";
+-      for (const PEXP *DimSizePE : AI->DimensionSizes)
+-        OS << "\t\t- " << DimSizePE->getPWA().str() << "\n";
+-    }
+-    if (AI->MayReadMap)
+-      OS << "\t\tMayRead: " << AI->MayReadMap << "\n";
+-    if (AI->MustReadMap)
+-      OS << "\t\tMustRead: " << AI->MustReadMap << "\n";
+-    if (AI->MayWriteMap)
+-      OS << "\t\tMayWrite: " << AI->MayWriteMap << "\n";
+-    if (AI->MustWriteMap)
+-      OS << "\t\tMustWrite: " << AI->MustWriteMap << "\n";
+-    OS << "\n";
++    AIt.second->collectParameters(ParameterSet);
++    AIt.second->print(OS);
+   }
+ 
+   OS << "Referenced parameters:\n";
+@@ -471,12 +479,45 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+   }
+ }
+ 
++void PACCSummary::ArrayInfo::print(raw_ostream &OS) const {
++  if (!DimensionSizes.empty()) {
++    OS << "\t\tDimension sizes:\n";
++    for (const PEXP *DimSizePE : DimensionSizes)
++      OS << "\t\t- " << DimSizePE->getPWA().str() << "\n";
++  }
++  if (MayReadMap)
++    OS << "\t\tMayRead: " << MayReadMap << "\n";
++  if (MustReadMap)
++    OS << "\t\tMustRead: " << MustReadMap << "\n";
++  if (MayWriteMap)
++    OS << "\t\tMayWrite: " << MayWriteMap << "\n";
++  if (MustWriteMap)
++    OS << "\t\tMustWrite: " << MustWriteMap << "\n";
++  OS << "\n";
++}
++
++void PACCSummary::ArrayInfo::collectParameters(std::set<PVId> &ParameterSet) const {
++  SmallVector<PVId, 8> ParameterVector;
++  MustWriteMap.getParameters(ParameterVector);
++  ParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
++  ParameterVector.clear();
++  MustReadMap.getParameters(ParameterVector);
++  ParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
++  ParameterVector.clear();
++  MayWriteMap.getParameters(ParameterVector);
++  ParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
++  ParameterVector.clear();
++  MayReadMap.getParameters(ParameterVector);
++  ParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
++}
++
+ void PACCSummary::dump(PolyhedralValueInfo *PVI) const { return print(dbgs(), PVI); }
+ 
+ // ------------------------------------------------------------------------- //
+ 
+-PolyhedralAccessInfo::PolyhedralAccessInfo(PolyhedralValueInfo &PI)
+-    : PI(PI), PEBuilder(PI.getPolyhedralExpressionBuilder()) {}
++PolyhedralAccessInfo::PolyhedralAccessInfo(PolyhedralValueInfo &PI,
++                                           LoopInfo &LI)
++    : PI(PI), LI(LI), PEBuilder(PI.getPolyhedralExpressionBuilder()) {}
+ 
+ PolyhedralAccessInfo::~PolyhedralAccessInfo() { releaseMemory(); }
+ 
+@@ -563,15 +604,14 @@ PolyhedralAccessInfo::getAccessSummary(ArrayRef<BasicBlock *> Blocks,
+   for (auto &BB : Blocks) {
+     for (auto &Inst : *BB) {
+ 
+-      if (const PACC *PA = getAsAccess(&Inst, Scope)) {
++      const PACC *PA = getAsAccess(&Inst, Scope);
++      if (PA)
+         PACCs.push_back(PA);
+-        continue;
+-      }
+ 
+       if (Inst.mayReadFromMemory())
+-        PS->UnknownReads.push_back(&Inst);
++        PA ? PS->KnownReads.push_back(PA) : PS->UnknownReads.push_back(&Inst);
+       if (Inst.mayWriteToMemory())
+-        PS->UnknownWrites.push_back(&Inst);
++        PA ? PS->KnownWrites.push_back(PA) : PS->UnknownWrites.push_back(&Inst);
+     }
+   }
+ 
+@@ -593,6 +633,453 @@ void PolyhedralAccessInfo::getParameters(
+   PI.getParameters(PA->getPEXP(), Values);
+ }
+ 
++struct Expr {
++  SmallVector<Expr *, 4> OperandExpressions;
++  SmallDenseSet<unsigned> Opcodes;
++
++  bool Commutative;
++
++  enum KindTy {
++    EK_ARGUMENT,
++    EK_CONSTANT,
++    EK_VALUE,
++    EK_INSTRUCTION,
++    EK_PHI,
++    EK_RECURRENCE,
++    EK_LOAD,
++  } Kind;
++
++  Value *Val;
++  SmallPtrSet<Value *, 4> PossibleMatches;
++
++  Expr(KindTy Kind, Value *Val) : Kind(Kind), Val(Val) {}
++
++  Expr(KindTy Kind, ArrayRef<Expr *> OperandExpressions, ArrayRef<unsigned> Opcodes,
++       bool Commutative)
++      : Kind(Kind), OperandExpressions(OperandExpressions.begin(), OperandExpressions.end()),
++        Commutative(Commutative), Val(nullptr) {
++    assert(Kind != EK_ARGUMENT || (Opcodes.empty() && OperandExpressions.empty()));
++    assert(Kind != EK_CONSTANT || (Opcodes.empty() && OperandExpressions.empty()));
++    for (unsigned Opcode : Opcodes)
++      this->Opcodes.insert(Opcode);
++  };
++
++  ~Expr() { DeleteContainerPointers(OperandExpressions); }
++
++  void print(raw_ostream &OS) const {
++    switch (Kind) {
++    case EK_ARGUMENT:
++      assert(Val);
++      OS << "[A] " << Val->getName();
++      break;
++    case EK_VALUE:
++      assert(Val);
++      OS << "[V] " << Val->getName();
++      break;
++    case EK_CONSTANT:
++      assert(Val);
++      OS << "[C] " << *Val;
++      break;
++    case EK_LOAD:
++      assert(Val);
++      OS << "[L] " << Val->getName();
++      break;
++    case EK_PHI:
++      assert(Val);
++      OS << "[P] " << Val->getName();
++      break;
++    case EK_RECURRENCE:
++      assert(OperandExpressions.size() == 0 || OperandExpressions.size() == 2);
++      if (OperandExpressions.size() == 0) {
++        OS << "[" << Val->getName() << "]";
++        break;
++      }
++      OS << "rec[" << Val->getName() << "](";
++      OperandExpressions[0]->print(OS);
++      OS << ", ";
++      OperandExpressions[1]->print(OS);
++      OS << ")";
++      break;
++    case EK_INSTRUCTION: {
++      std::string OpcodeStr = "";
++      switch (*Opcodes.begin()) {
++      case Instruction::Add:
++      case Instruction::FAdd:
++        OpcodeStr = "+";
++        break;
++      case Instruction::Mul:
++      case Instruction::FMul:
++        OpcodeStr = "*";
++        break;
++      case Instruction::SDiv:
++      case Instruction::UDiv:
++      case Instruction::FDiv:
++        OpcodeStr = "/";
++        break;
++      case Instruction::SRem:
++      case Instruction::URem:
++      case Instruction::FRem:
++        OpcodeStr = "%";
++        break;
++      default:
++        OpcodeStr = "@";
++      }
++      assert(!OperandExpressions.empty());
++      OS << "(";
++      OperandExpressions[0]->print(OS);
++      for (unsigned u = 1, e = OperandExpressions.size(); u < e; u++) {
++        OS << " " << OpcodeStr << " ";
++        OperandExpressions[u]->print(OS);
++      }
++      OS << ")";
++    }
++    }
++  }
++  void dump() const { print(dbgs()); }
++
++  bool matches(Value *V) {
++    errs() << "Match V: " << *V << "\n";
++    if (Val && V == Val) {
++      assert(Kind == EK_VALUE || Kind == EK_INSTRUCTION || Kind == EK_ARGUMENT);
++      PossibleMatches.insert(Val);
++      return true;
++    }
++    if (Instruction *I = dyn_cast<Instruction>(V))
++      return matches(I);
++    if (!OperandExpressions.empty() || !Opcodes.empty())
++      return false;
++    if (Kind == EK_CONSTANT && isa<Constant>(V)) {
++      PossibleMatches.insert(V);
++      return true;
++    }
++    if (Kind == EK_ARGUMENT && isa<Argument>(V)) {
++      PossibleMatches.insert(V);
++      return true;
++    }
++    if (!Val && Kind == EK_VALUE) {
++      PossibleMatches.insert(V);
++      return true;
++    }
++    return false;
++  }
++
++  static void collectOperands(Value *CurV, unsigned OpcodeI,
++                              SmallVectorImpl<Value *> &OperandsI) {
++    Instruction *CurI = dyn_cast<Instruction>(CurV);
++    if (!CurI || CurI->getOpcode() != OpcodeI) {
++      OperandsI.push_back(CurV);
++      return;
++    }
++    for (auto &CurOperand : CurI->operands())
++      return collectOperands(CurOperand, OpcodeI, OperandsI);
++  }
++
++  bool matches(Instruction *I) {
++    errs() << "Match I: " << *I << "\n";
++    if (Kind == EK_CONSTANT || Kind == EK_ARGUMENT)
++      return false;
++    if (Val && I == Val) {
++      assert(Kind == EK_VALUE || Kind == EK_INSTRUCTION);
++      PossibleMatches.insert(I);
++      return true;
++    }
++    if (!Val && OperandExpressions.empty() && Opcodes.empty() &&
++        (Kind == EK_VALUE || Kind == EK_INSTRUCTION)) {
++      PossibleMatches.insert(I);
++      return true;
++    }
++
++    unsigned NumRequiredOperands = OperandExpressions.size();
++    if (I->getNumOperands() > NumRequiredOperands)
++      return false;
++
++    unsigned OpcodeI = I->getOpcode();
++    if (!Opcodes.count(OpcodeI))
++      return false;
++
++    using OperandsVecTy = SmallVector<Value*, 4>;
++    OperandsVecTy OperandsI;
++
++    for (auto &Operand : I->operands())
++      collectOperands(Operand, OpcodeI, OperandsI);
++
++    if (OperandsI.size() < NumRequiredOperands)
++      return false;
++
++    SmallVector<SmallDenseSet<unsigned, 4>, 4> OperandMatches;
++    OperandMatches.resize(NumRequiredOperands);
++    for (unsigned OpIdx = 0; OpIdx < NumRequiredOperands; OpIdx++) {
++      Expr *OperandExpression = OperandExpressions[OpIdx];
++      bool MatchesFirst = OperandExpression->matches(OperandsI[OpIdx]);
++      if (!Commutative && !MatchesFirst)
++        return false;
++      if (MatchesFirst)
++        OperandMatches[OpIdx].insert(OpIdx);
++      if (!Commutative)
++        continue;
++      for (unsigned OpIdx2 = 0; OpIdx2 < NumRequiredOperands; OpIdx2++) {
++        if (OpIdx2 != OpIdx && OperandExpression->matches(OperandsI[OpIdx2]))
++          OperandMatches[OpIdx2].insert(OpIdx2);
++      }
++    }
++
++    if (!Commutative) {
++      PossibleMatches.insert(I);
++      return true;
++    }
++
++    // TODO
++    for (unsigned OpIdx = 0; OpIdx < NumRequiredOperands; OpIdx++)
++      if (!OperandMatches[OpIdx].count(OpIdx)) {
++        I->dump();
++        errs() << "Fail: " << OpIdx <<"\n";
++        for (auto &It : OperandMatches[OpIdx])
++          errs() << " - " << It << "\n";
++        return false;
++      }
++
++    PossibleMatches.insert(I);
++    return true;
++  }
++};
++
++void PolyhedralAccessInfo::detectKnownComputations(Function &F) {
++
++#if 0
++  PACCSummary *PS = getAccessSummary(F, PACCSummary::SSK_COMPLETE);
++
++  for (auto &It : *PS) {
++    int i = 0;
++    errs() << "BP: " << *It.first << "\n";
++    PACCSummary::ArrayInfo &AI = *It.second;
++    AI.print(errs());
++    errs() << "i: " << i++ << "\n";
++    if (AI.DimensionSizes.size() != 1)
++      continue;
++    errs() << "i: " << i++ << "\n";
++    if (AI.MayWriteMap || AI.MayReadMap)
++      continue;
++    errs() << "i: " << i++ << "\n";
++    if (!AI.MustWriteMap || !AI.MustReadMap)
++      continue;
++    errs() << "i: " << i++ << "\n";
++    if (AI.MustWriteMap.isEmpty() || AI.MustReadMap.isEmpty())
++      continue;
++    errs() << "i: " << i++ << "\n";
++    if (!AI.MustWriteMap.isEqual(AI.MustReadMap))
++      continue;
++    errs() << "i: " << i++ << "\n";
++    if (AI.Accesses.size() != 2)
++      continue;
++    errs() << "i: " << i++ << " [6]\n";
++    const PACC *PA0 = AI.Accesses[0];
++    const PACC *PA1 = AI.Accesses[1];
++    int Idx = PA0->isRead() ? 0 : 1;
++    if (!isa<LoadInst>(AI.Accesses[Idx]->getPEXP()->getValue()) ||
++        !isa<StoreInst>(AI.Accesses[1-Idx]->getPEXP()->getValue()))
++      continue;
++    errs() << "i: " << i++ << " [7]\n";
++    StoreInst *SI = cast<StoreInst>(AI.Accesses[1-Idx]->getPEXP()->getValue());
++    LoadInst *LI = cast<LoadInst>(AI.Accesses[Idx]->getPEXP()->getValue());
++
++    Expr *Alpha = new Expr(Expr::EK_VALUE, nullptr);
++    Expr *Beta = new Expr(Expr::EK_VALUE, nullptr);
++    Expr *C = new Expr(Expr::EK_INSTRUCTION, nullptr);
++    Expr *LIExpr = new Expr(Expr::EK_INSTRUCTION, LI);
++    Expr *MulAlphaC = new Expr(Expr::EK_INSTRUCTION, {C, Alpha},
++                               {Instruction::Mul, Instruction::FMul}, true);
++    Expr *MulBetaLI = new Expr(Expr::EK_INSTRUCTION, {LIExpr, Beta},
++                               {Instruction::Mul, Instruction::FMul}, true);
++    Expr *E = new Expr(Expr::EK_INSTRUCTION, {MulAlphaC, MulBetaLI},
++                       {Instruction::Add, Instruction::FAdd}, true);
++    errs() << "Match: " << E->matches(SI->getValueOperand()) << "\n";
++    auto P = [&](std::string S, Expr *E) {
++      errs() << S << ":";
++      for (auto *PM : E->PossibleMatches)
++        errs() << " " << *PM << ",";
++      if (E->PossibleMatches.empty())
++        errs() << " None\n";
++      else
++        errs() << "\n";
++    };
++    P("E", E);
++    P("MulBetaLI", MulBetaLI);
++    P("MulAlphaC", MulAlphaC);
++    P("LIExpr", LIExpr);
++    P("C", C);
++    P("Beta", Beta);
++    P("Alpha", Alpha);
++    delete E;
++  }
++#endif
++}
++
++void PolyhedralAccessInfo::extractComputations(Function &F) {
++  errs() << "\n\nEXTRACT COMPUTATIONS:\n\n";
++  const DataLayout &DL = F.getParent()->getDataLayout();
++
++  for (BasicBlock &BB : F) {
++    for (Instruction &I : BB) {
++      if (!isa<StoreInst>(I))
++        continue;
++      StoreInst *SI = cast<StoreInst>(&I);
++
++      SmallVector<LoadInst *, 8> Loads;
++      SmallVector<PHINode *, 8> PHIs;
++      DenseMap<Value *, Expr *> Value2ExprMap;
++      Value *ExprV = SI->getValueOperand();
++
++      std::function<Expr *(Value *)> ExprExtractor = [&](Value *V) {
++        if (Expr *E = Value2ExprMap.lookup(V))
++          return E;
++
++        if (isa<Constant>(V)) {
++          Expr *E = new Expr(Expr::EK_CONSTANT, V);
++          Value2ExprMap[V] = E;
++          return E;
++        }
++
++        Instruction *I = dyn_cast<Instruction>(V);
++        if (!I) {
++          Expr *E = new Expr(Expr::EK_VALUE, V);
++          Value2ExprMap[V] = E;
++          return E;
++        }
++
++        if (PHINode *PHI = dyn_cast<PHINode>(I)) {
++          if (PHI->getNumOperands() == 1)
++            return ExprExtractor(PHI->getOperand(0));
++          if (PHI->getNumOperands() == 2 && LI.isLoopHeader(PHI->getParent())) {
++            unsigned LoopIdx = LI.getLoopFor(PHI->getParent())
++                                       ->contains(PHI->getIncomingBlock(0))
++                                   ? 0
++                                   : 1;
++            Expr *StartE = ExprExtractor(PHI->getOperand(1 - LoopIdx));
++            Value2ExprMap[PHI] = new Expr(Expr::EK_RECURRENCE, PHI);
++            Expr *LoopE = ExprExtractor(PHI->getOperand(LoopIdx));
++            Expr *E = new Expr(Expr::EK_RECURRENCE, {StartE, LoopE}, {}, false);
++            E->Val = PHI;
++            Value2ExprMap[PHI] = E;
++            PHIs.push_back(PHI);
++            return E;
++          }
++
++          Expr *E = new Expr(Expr::EK_PHI, I);
++          Value2ExprMap[V] = E;
++          return E;
++        }
++
++        if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
++          Loads.push_back(LI);
++          Expr *E = new Expr(Expr::EK_LOAD, I);
++          Value2ExprMap[V] = E;
++          return E;
++        }
++
++        SmallVector<unsigned, 4> Opcodes;
++        switch (I->getOpcode()) {
++        case Instruction::Add:
++        case Instruction::FAdd:
++          Opcodes.push_back(Instruction::Add);
++          Opcodes.push_back(Instruction::FAdd);
++          break;
++        case Instruction::Mul:
++        case Instruction::FMul:
++          Opcodes.push_back(Instruction::Mul);
++          Opcodes.push_back(Instruction::FMul);
++          break;
++        default:
++          Opcodes.push_back(I->getOpcode());
++        }
++
++        SmallVector<Expr *, 4> OperandExpressions;
++        for (auto &Operand : I->operands()) {
++          Expr *OperandExpr = ExprExtractor(Operand);
++          if (std::all_of(Opcodes.begin(), Opcodes.end(), [&](unsigned Opcode) {
++                return OperandExpr->Opcodes.count(Opcode);
++              }))
++            OperandExpressions.append(OperandExpr->OperandExpressions.begin(),
++                                      OperandExpr->OperandExpressions.end());
++          else
++            OperandExpressions.push_back(OperandExpr);
++        }
++
++        Expr *E = new Expr(Expr::EK_INSTRUCTION, OperandExpressions, Opcodes,
++                           I->isCommutative());
++        Value2ExprMap[V] = E;
++        return E;
++      };
++
++      Expr *E = ExprExtractor(ExprV);
++
++      SmallVector<std::pair<PHINode *, const PEXP *>, 32> Recurrences;
++      SmallVector<const PACC *, 32> PACCs;
++      PACCs.push_back(getAsAccess(SI));
++      size_t MaxLoadName = 4;
++      bool ValidLoads = true;
++      for (LoadInst *LI : Loads) {
++        if (!LI->hasName())
++          LI->setName("L");
++        MaxLoadName = std::max(MaxLoadName, LI->getName().size());
++        const PACC *LIPA = getAsAccess(LI);
++        if (!LIPA) {
++          ValidLoads = false;
++          break;
++        }
++        PACCs.push_back(LIPA);
++      }
++      bool ValidRecurrences = true;
++      for (PHINode *PHI : PHIs) {
++        if (!PHI->hasName())
++          PHI->setName("P");
++        const PEXP *PHIDomainPE = PI.getDomainFor(PHI->getParent());
++        if (!PHIDomainPE || !PI.isAffine(PHIDomainPE)) {
++          ValidRecurrences = false;
++          break;
++        }
++        Recurrences.push_back({PHI, PHIDomainPE});
++      }
++
++      if (!ValidLoads || !ValidRecurrences) {
++        //delete E;
++        continue;
++      }
++
++      PACCSummary *PS =
++          new PACCSummary(PACCSummary::SSK_COMPLETE,
++                          [](Instruction *) { return true; }, nullptr);
++      PS->finalize(PI, PACCs, DL);
++
++      errs() << "\nFound computation:\n\t";
++      E->dump();
++      errs() << "\nAccesses:\n";
++      for (auto &ArrayInfoIt : PS->ArrayInfoMap) {
++        for (auto &MultiDimAccessIt : ArrayInfoIt.second->AccessMultiDimMap) {
++          Value *AccessInst = MultiDimAccessIt.first->getPEXP()->getValue();
++          if (isa<StoreInst>(AccessInst))
++            errs() << "\t- "
++                   << std::string(" ",MaxLoadName - 4) << "ROOT:\t"
++                   << MultiDimAccessIt.second << "\n";
++          else
++            errs() << "\t- "
++                   << std::string(" ",
++                                  MaxLoadName - AccessInst->getName().size())
++                   << AccessInst->getName() << ":\t" << MultiDimAccessIt.second
++                   << "\n";
++        }
++      }
++      errs() << "Recurrences:\n";
++      for (std::pair<PHINode *, const PEXP *> &RecurrenceIt : Recurrences) {
++        errs() << "\t- " << RecurrenceIt.first->getName() << ":\t"
++               << RecurrenceIt.second << "\n";
++      }
++      errs() << "\n";
++      //delete E;
++      delete PS;
++    }
++  }
++}
++
+ void PolyhedralAccessInfo::print(raw_ostream &OS) const {}
+ 
+ // ------------------------------------------------------------------------- //
+@@ -601,6 +1088,7 @@ char PolyhedralAccessInfoWrapperPass::ID = 0;
+ 
+ void PolyhedralAccessInfoWrapperPass::getAnalysisUsage(
+     AnalysisUsage &AU) const {
++  AU.addRequired<LoopInfoWrapperPass>();
+   AU.addRequired<PolyhedralValueInfoWrapperPass>();
+   AU.setPreservesAll();
+ }
+@@ -614,10 +1102,16 @@ void PolyhedralAccessInfoWrapperPass::releaseMemory() {
+ 
+ bool PolyhedralAccessInfoWrapperPass::runOnFunction(Function &F) {
+ 
++  this->F = &F;
++
+   PAI = new PolyhedralAccessInfo(
+-      getAnalysis<PolyhedralValueInfoWrapperPass>().getPolyhedralValueInfo());
++      getAnalysis<PolyhedralValueInfoWrapperPass>().getPolyhedralValueInfo(),
++      getAnalysis<LoopInfoWrapperPass>().getLoopInfo());
++
++  PAI->detectKnownComputations(F);
++
++  PAI->extractComputations(F);
+ 
+-  this->F = &F;
+   return false;
+ }
+ 
+@@ -627,6 +1121,7 @@ void PolyhedralAccessInfoWrapperPass::print(raw_ostream &OS,
+   NVVMRewriter<PVMap, /* UseGlobalIdx */ false> CudaRewriter;
+   PS->rewrite(CudaRewriter);
+   PS->print(OS, &PAI->getPolyhedralValueInfo());
++
+ }
+ 
+ FunctionPass *llvm::createPolyhedralAccessInfoWrapperPass() {
+@@ -642,11 +1137,13 @@ AnalysisKey PolyhedralAccessInfoAnalysis::Key;
+ PolyhedralAccessInfo
+ PolyhedralAccessInfoAnalysis::run(Function &F, FunctionAnalysisManager &AM) {
+   auto &PI = AM.getResult<PolyhedralValueInfoAnalysis>(F);
+-  return PolyhedralAccessInfo(PI);
++  auto &LI = AM.getResult<LoopAnalysis>(F);
++  return PolyhedralAccessInfo(PI, LI);
+ }
+ 
+ INITIALIZE_PASS_BEGIN(PolyhedralAccessInfoWrapperPass, "polyhedral-access-info",
+                       "Polyhedral value analysis", false, true);
++INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
+ INITIALIZE_PASS_DEPENDENCY(PolyhedralValueInfoWrapperPass);
+ INITIALIZE_PASS_END(PolyhedralAccessInfoWrapperPass, "polyhedral-access-info",
+                     "Polyhedral value analysis", false, true)
+diff --git a/lib/Analysis/PolyhedralExpressionBuilder.cpp b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+index a92205e..4ead5cd 100644
+--- a/lib/Analysis/PolyhedralExpressionBuilder.cpp
++++ b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+@@ -36,13 +36,19 @@ bool PolyhedralExpressionBuilder::combine(PEXP *PE, const PEXP *Other) {
+ 
+   PVSet OtherID = Other->getInvalidDomain();
+   if (OtherID) {
+-    adjustDomainDimensions(OtherID, Other, PE);
++    if (!adjustDomainDimensions(OtherID, Other, PE)) {
++      PE->invalidate();
++      return false;
++    }
+     PE->addInvalidDomain(OtherID);
+   }
+ 
+   PVSet OtherKD = Other->getKnownDomain();
+   if (OtherKD) {
+-    adjustDomainDimensions(OtherKD, Other, PE);
++    if (!adjustDomainDimensions(OtherKD, Other, PE)) {
++      PE->invalidate();
++      return false;
++    }
+     PE->addKnownDomain(OtherKD);
+   }
+ 
+@@ -291,7 +297,7 @@ PEXP *PolyhedralExpressionBuilder::getDomain(BasicBlock &BB) {
+   };
+ 
+   unsigned LD = getRelativeLoopDepth(&BB);
+-  PE->setDomain(PVSet::empty(PI.getCtx(), LD));
++  PE->setDomain(PVSet::empty(PI.getCtx(), LD), true);
+ 
+   for (auto *PredBB : predecessors(&BB)) {
+     DEBUG(dbgs() << " Predecessor: " << PredBB->getName() << "\n");
+@@ -323,7 +329,11 @@ PEXP *PolyhedralExpressionBuilder::getDomain(BasicBlock &BB) {
+ 
+     PVAff PredDomPWA = PredDomPE->getPWA();
+     PredDomPWA.intersectDomain(DomainOnEdge);
+-    adjustDomainDimensions(PredDomPWA, PredDomPE, PE);
++    if (!adjustDomainDimensions(PredDomPWA, PredDomPE, PE)) {
++      DEBUG(dbgs() << "  Could not adjust predecessor domain!\n");
++      ForgetDomainsInLoop(*L);
++      return PE->invalidate();
++    }
+     PE->PWA.union_add(PredDomPWA);
+ 
+     // Sanity check
+@@ -350,7 +360,8 @@ PEXP *PolyhedralExpressionBuilder::getDomain(BasicBlock &BB) {
+     return PE;
+   }
+ 
+-#if 0
++//#if 0
++  PVSet Domain = PE->getDomain();
+   PVSet NonExitDom = Domain.setInputLowerBound(LD - 1, 0);
+   DEBUG(dbgs() << "NonExitDom :" << NonExitDom << "\n");
+   PE->setDomain(NonExitDom, true);
+@@ -374,14 +385,14 @@ PEXP *PolyhedralExpressionBuilder::getDomain(BasicBlock &BB) {
+     PVSet ExitCond;
+     for (auto *SuccBB : successors(ExitingBB))
+       if (!L->contains(SuccBB)) {
+-        PEXP *ExitingPE = getDomainOnEdge(*ExitingBBDomainPE, *SuccBB);
+-        if (!ExitingPE || ExitingPE->PWA.isComplex()) {
++        PVSet DomainOnEdge;
++        if (!getDomainOnEdge(DomainOnEdge, *ExitingBBDomainPE, *SuccBB) ||
++            DomainOnEdge.isComplex()) {
+           ForgetDomainsInLoop(*L);
+           return PE->invalidate();
+         }
+-        combine(PE, ExitingPE);
+-        ExitCond.unify(ExitingPE->getDomain());
+-        delete ExitingPE;
++        //combine(PE, DomainOnEdge);
++        ExitCond.unify(DomainOnEdge);
+       }
+     DEBUG(dbgs() << "ExitCond: " << ExitCond << "\n");
+     ExitingBBDom.intersect(ExitCond);
+@@ -404,21 +415,24 @@ PEXP *PolyhedralExpressionBuilder::getDomain(BasicBlock &BB) {
+   DEBUG(dbgs() << "Dom :" << Domain << "\n");
+   Domain.unify(NonExitDom);
+   DEBUG(dbgs() << "Dom :" << Domain << "\n");
+-#endif
++//#endif
+ 
+-  PVSet UnboundedDomain, Domain;
+-  Domain = PE->getDomain();
+-  Domain.restrictToBoundedPart(LD - 1, &UnboundedDomain);
+-  PE->addInvalidDomain(UnboundedDomain);
++  //PVSet UnboundedDomain, Domain;
++  //Domain = PE->getDomain();
++  //Domain.restrictToBoundedPart(LD - 1, &UnboundedDomain);
++  //PE->addInvalidDomain(UnboundedDomain);
+ 
+-  if (Domain.isEmpty())
+-    PE->invalidate();
+-  else
+-    PE->setDomain(Domain, true);
++  //if (Domain.isEmpty())
++    //PE->invalidate();
++  //else
++    //PE->setDomain(Domain, true);
+ 
+   ForgetDomainsInLoop(*L);
+ 
+   NUM_DOMAINS++;
++  PE->PWA.dropUnusedParameters();
++  PE->KnownDomain.dropUnusedParameters();
++  PE->InvalidDomain.dropUnusedParameters();
+   return PE;
+ }
+ 
+@@ -441,6 +455,7 @@ bool PolyhedralExpressionBuilder::getDomainOnEdge(PVSet &DomainOnEdge,
+                << "\nEdgeCond: " << EdgeCondition << "\n");
+ 
+   DomainOnEdge = PVSet::intersect(PredDomain, EdgeCondition);
++  DomainOnEdge.dropUnusedParameters();
+   return true;
+ }
+ 
+@@ -508,6 +523,9 @@ PEXP *PolyhedralExpressionBuilder::visit(Value &V) {
+   if (PI.isAffine(PE))
+     NUM_EXPRESSIONS++;
+ 
++  PE->PWA.dropUnusedParameters();
++  PE->KnownDomain.dropUnusedParameters();
++  PE->InvalidDomain.dropUnusedParameters();
+   return PE;
+ }
+ 
+@@ -567,7 +585,7 @@ Loop *PolyhedralExpressionBuilder::getLoopForPE(const PEXP *PE) {
+ }
+ 
+ template <typename PVTy>
+-void PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj,
++bool PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj,
+                                                          const PEXP *OldPE,
+                                                          const PEXP *NewPE,
+                                                          bool LastIt) {
+@@ -581,17 +599,17 @@ void PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj,
+ /// This function assumes @p NewL and @p OldL are equal or there is a CFG
+ /// edge from @p OldL to @p NewL.
+ template<typename PVTy>
+-void PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj, Loop *OldL,
++bool PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj, Loop *OldL,
+                                                          Loop *NewL,
+                                                          bool LastIt) {
+   // If the loops are the same there is nothing to do.
+   if (NewL == OldL)
+-    return;
++    return true;
+ 
+   unsigned OldDepth = getRelativeLoopDepth(OldL);
+   unsigned NewDepth = getRelativeLoopDepth(NewL);
+   if (OldDepth == NewDepth && OldDepth == 0)
+-    return;
++    return true;
+ 
+   // Sanity check
+   DEBUG(dbgs() << " OldDepth: " << OldDepth << " NewDepth: " << NewDepth
+@@ -609,6 +627,8 @@ void PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj, Loop *OldL,
+     assert(OldL->getParentLoop() == NewL->getParentLoop());
+     if (LastIt)
+       Obj.maxInLastInputDims(1);
++    if (!Obj)
++      return false;
+     Obj.dropLastInputDims(1);
+     Obj.addInputDims(1);
+   } else if (OldDepth < NewDepth) {
+@@ -619,8 +639,12 @@ void PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj, Loop *OldL,
+     unsigned DepthDiff = OldDepth - NewDepth;
+     if (LastIt)
+       Obj.maxInLastInputDims(DepthDiff);
++    if (!Obj)
++      return false;
+     Obj.dropLastInputDims(DepthDiff);
+   }
++
++  return true;
+ }
+ 
+ PEXP *PolyhedralExpressionBuilder::visit(Instruction &I) {
+@@ -634,6 +658,10 @@ PEXP *PolyhedralExpressionBuilder::visit(Instruction &I) {
+   unsigned NumDims = PE->PWA.getNumInputDimensions();
+   DEBUG(dbgs() << "RelLD: " << RelLD << " NumDims " << NumDims << "\n\t => "
+                << PE << "\n");
++  // TODO FIXME:
++  if (NumDims > RelLD) {
++    return PE->invalidate();
++  }
+   assert(NumDims <= RelLD);
+   PE->PWA.addInputDims(RelLD - NumDims);
+   assert(PE->PWA.getNumInputDimensions() == RelLD);
+@@ -736,7 +764,8 @@ PolyhedralExpressionBuilder::visitGetElementPtrInst(GetElementPtrInst &I) {
+ 
+   auto *PE = getOrCreatePEXP(I);
+   *PE = *PtrPE;
+-  adjustDomainDimensions(PE->PWA, PtrPE, PE, true);
++  if (!adjustDomainDimensions(PE->PWA, PtrPE, PE, true))
++    return visitParameter(I);
+ 
+   auto *Ty = I.getPointerOperandType();
+   for (auto &Op : make_range(I.idx_begin(), I.idx_end())) {
+@@ -756,6 +785,7 @@ PolyhedralExpressionBuilder::visitGetElementPtrInst(GetElementPtrInst &I) {
+         const StructLayout *Layout = DL.getStructLayout(cast<StructType>(Ty));
+         auto ElementOffset = Layout->getElementOffset(StructElementNo);
+         PVAff Offset(PE->PWA, ElementOffset);
++        PE->PWA.add(Offset);
+         Ty = Ty->getStructElementType(StructElementNo);
+         continue;
+       }
+@@ -923,14 +953,26 @@ PEXP *PolyhedralExpressionBuilder::visitConditionalPHINode(PHINode &I) {
+ 
+     PVAff PredOpPWA = PredOpPE->getPWA();
+     PredOpPWA.intersectDomain(DomainOnEdge);
+-    adjustDomainDimensions(PredOpPWA, PredDomPE, PE, true);
++
++    if (PredOpPWA.getDomain().isEmpty())
++      continue;
++
++    if (!adjustDomainDimensions(PredOpPWA, PredDomPE, PE, true))
++      return visitParameter(I);
+     PE->PWA.union_add(PredOpPWA);
++    DEBUG(dbgs() << "  After operand no " << u << ": " << PE << "\n");
+ 
+     // Sanity check
+     assert(PE->getPWA().getNumInputDimensions() == RelLD);
++
++    if (PE->getPWA().isComplex()) {
++      DEBUG(dbgs() << "Too complex PHI!\n";);
++      COMPLEX_DOMAIN++;
++      return visitParameter(I);
++    }
+   }
+ 
+-  if (!PE->isInitialized()) {
++  if (!PE->isInitialized() || PE->getDomain().isEmpty()) {
+     // No valid predecessor found.
+     return visitParameter(I);
+   }
+@@ -957,6 +999,12 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+   if (!IsLoopHeader)
+     return visitConditionalPHINode(I);
+ 
++  unsigned NumLatches = L->getNumBackEdges();
++  if (NumLatches > 1) {
++    DEBUG(dbgs() << "TODO revisit multiple latch loops!\n");
++    return visitParameter(I);
++  }
++
+   PEXP *ParamPE = PIC.getOrCreatePEXP(I, L);
+   assert(ParamPE);
+ 
+@@ -967,7 +1015,6 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+   }
+ 
+   PEXP *PE = getOrCreatePEXP(I);
+-  assert(PE && !PE->isInitialized());
+ 
+   if (Scope == L || (Scope && !Scope->contains(&I))) {
+     DEBUG(dbgs() << "PHI not in scope. Parametric value is sufficent!\n");
+@@ -975,14 +1022,25 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+     return PE;
+   }
+ 
++  if (!PE || PE->isInitialized()) {
++    errs() << "Ooo. " << PE << " : " << I << "\n";
++    if (PE)
++      PE->dump();
++  }
++  assert(PE && !PE->isInitialized());
++  PE->PWA = PVAff(Id);
++  PE->setKind(PEXP::EK_UNKNOWN_VALUE);
++
+   unsigned LoopDim = getRelativeLoopDepth(L);
+ 
+   auto OldScope = Scope;
+   setScope(L);
+ 
+-  bool ConstantStride = true;
+   PVAff BackEdgeOp;
+-  unsigned NumLatches = L->getNumBackEdges();
++
++  PVSet NegationSet;
++  bool OtherPHIs = false;
++  SmallVector<std::pair<PVId, PVAff>, 4> PHIInfos;
+   for (unsigned u = 0, e = I.getNumIncomingValues(); u != e; u++) {
+     auto *OpBB = I.getIncomingBlock(u);
+     if (!L->contains(OpBB))
+@@ -991,7 +1049,75 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+     auto *OpVal = I.getIncomingValue(u);
+     auto *OpPE = visit(*OpVal);
+     PVAff OpAff = OpPE->getPWA();
+-    OpAff.dropParameter(Id);
++    DEBUG(dbgs() << "PHI operand (" << u << ") aff in loop: " << OpAff << "\n");
++
++    bool SelfRecurrent = false;
++    SmallVector<PVId, 4> Parameters;
++    OpAff.getParameters(Parameters);
++    for (const PVId &ParameterId : Parameters) {
++      Value *ParameterV = ParameterId.getPayloadAs<Value *>();
++      if (!isa<Instruction>(ParameterV)) {
++        //OpAff.dropParameter(ParameterId);
++        continue;
++      }
++      Instruction *ParameterI = cast<Instruction>(ParameterV);
++      if (!L->contains(ParameterI)) {
++        //OpAff.dropParameter(ParameterId);
++        continue;
++      }
++      if (ParameterV == &I) {
++        SelfRecurrent = true;
++        continue;
++      }
++      if (isa<PHINode>(ParameterI) &&
++          ParameterI->getParent() == I.getParent()) {
++        const PEXP *ParameterPE = PI.getPEXP(ParameterI, OldScope);
++        if (!PI.isAffine(ParameterPE)) {
++          DEBUG(dbgs() << "PHI operand is non-affine loop phi: " << *ParameterI
++                       << "\n => " << ParameterPE << "\n";);
++          setScope(OldScope);
++          return visitParameter(I);
++        }
++        if (!PI.hasScope(ParameterPE, L, true)) {
++          DEBUG(dbgs() << "PHI operand is phi with in loop dependences: "
++                       << *ParameterI << "\n => " << ParameterPE << "\n";);
++          setScope(OldScope);
++          return visitParameter(I);
++        }
++        PVAff ParameterCoeff = OpAff.getParameterCoeff(ParameterId);
++        assert(ParameterCoeff.isInteger());
++        OtherPHIs = true;
++        PHIInfos.push_back(
++            {ParameterId, ParameterCoeff.multiply(ParameterPE->getPWA())});
++        continue;
++      }
++      DEBUG(dbgs() << "PHI references unknown parameter: " << *ParameterI
++                   << "\n");
++      setScope(OldScope);
++      return visitParameter(I);
++    }
++
++    if (SelfRecurrent) {
++      for (auto &PHIInfo : PHIInfos) {
++        if (PHIInfo.second.involvesInput(LoopDim - 1)) {
++          DEBUG(
++              errs()
++              << "PHI is self reccurent but also involves recurrent other PHI: "
++              << PHIInfo.first << " => " << PHIInfo.second << "\n");
++          setScope(OldScope);
++          return visitParameter(I);
++        }
++      }
++
++      OpAff = OpAff.perPiecePHIEvolution(Id, LoopDim - 1, NegationSet);
++      DEBUG(dbgs() << "After per piece evolution: " << OpAff << "\n");
++      if (!OpAff) {
++        setScope(L->getParentLoop());
++        return visitParameter(I);
++      }
++    }
++
++#if 0
+     if (!OpAff.isConstant()) {
+       DEBUG(dbgs() << "PHI has non constant stride: " << OpPE << "\n\tfor "
+                    << *OpVal << "\n");
+@@ -1009,9 +1135,10 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+         setScope(L);
+       }
+     }
++#endif
+ 
+-    OpAff = OpPE->getPWA();
+-    if (NumLatches > 1 || !ConstantStride) {
++    //OpAff = OpPE->getPWA();
++    if (NumLatches > 1 || OtherPHIs) {
+       PEXP *OpBBDomPE = getDomain(*OpBB);
+       assert(OpBBDomPE);
+ 
+@@ -1031,8 +1158,9 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+     DEBUG(dbgs() << "Back edge Op: " << OpAff << "\n");
+     BackEdgeOp.union_add(OpAff);
+   }
++  DEBUG(dbgs() << "BackEdgeOp: " << BackEdgeOp << "\n");
+ 
+-  DEBUG(dbgs() << "Final Back edge Op: " << BackEdgeOp << "\n");
++#if 0
+   if (ConstantStride) {
+     BackEdgeOp = BackEdgeOp.perPiecePHIEvolution(Id, LoopDim - 1);
+     if (!BackEdgeOp) {
+@@ -1041,8 +1169,14 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+       return visitParameter(I);
+     }
+   }
++#endif
+ 
+-  DEBUG(dbgs() << "BackEdgeOp: " << BackEdgeOp << "\n");
++  for (auto &PHIInfo : PHIInfos) {
++    BackEdgeOp.dropParameter(PHIInfo.first);
++    BackEdgeOp.add(PHIInfo.second.moveOneIteration(LoopDim - 1));
++  }
++  DEBUG(dbgs() << "Back edge op combined with other PHIs: " << BackEdgeOp
++               << "\n");
+ 
+   PE->PWA = PVAff();
+   PE->PWA.union_add(BackEdgeOp);
+@@ -1062,7 +1196,7 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+ 
+     PVAff OpAff = OpPE->getPWA();
+     assert(e > NumLatches);
+-    if (e - NumLatches > 1 || !ConstantStride) {
++    if (e - NumLatches > 1 || OtherPHIs) {
+       PEXP *OpBBDomPE = getDomain(*OpBB);
+       assert(OpBBDomPE);
+ 
+@@ -1080,8 +1214,16 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+     combine(PE, OpPE);
+   }
+ 
++  if (NegationSet) {
++    DEBUG(dbgs() << "Negate back value for negation set: " << NegationSet
++                 << "\n");
++    PVAff NegationAff(PE->PWA.getDomain(), 1);
++    NegationAff.union_add(PVAff(NegationSet, -2));
++    PE->PWA.multiply(NegationAff);
++  }
++
+   PE->Kind = PEXP::EK_UNKNOWN_VALUE;
+-  DEBUG(dbgs() << "PHI: " << PE->PWA << "\n");
++  DEBUG(dbgs() << "Final PHI value: " << PE->PWA << "\n");
+ 
+   return PE;
+ }
+@@ -1151,8 +1293,10 @@ PEXP *PolyhedralExpressionBuilder::visitBinaryOperator(BinaryOperator &I) {
+   // Bit operations
+   case Instruction::And:
+     if (I.getType()->isIntegerTy(1)) {
+-      if (assign(PE, PEOp0, PEOp1, PVAff::createMultiply))
++      if (assign(PE, PEOp0, PEOp1, PVAff::createAdd)) {
++        PE->PWA.floordiv(2);
+         PE->PWA.select(getOne(PE->PWA), getZero(PE->PWA));
++      }
+       return PE;
+     }
+     return visitParameter(I);
+diff --git a/lib/Analysis/PolyhedralValueInfo.cpp b/lib/Analysis/PolyhedralValueInfo.cpp
+index 5c07fd2..b129a5d 100644
+--- a/lib/Analysis/PolyhedralValueInfo.cpp
++++ b/lib/Analysis/PolyhedralValueInfo.cpp
+@@ -15,6 +15,7 @@
+ #include "llvm/ADT/Statistic.h"
+ #include "llvm/Analysis/Passes.h"
+ #include "llvm/Analysis/PolyhedralExpressionBuilder.h"
++#include "llvm/Analysis/RegionInfo.h"
+ #include "llvm/IR/Operator.h"
+ #include "llvm/Pass.h"
+ #include "llvm/Support/Debug.h"
+@@ -258,23 +259,34 @@ PolyhedralValueInfo::PolyhedralValueInfo(PVCtx Ctx, LoopInfo &LI)
+ 
+ PolyhedralValueInfo::~PolyhedralValueInfo() { delete PEBuilder; }
+ 
+-const PEXP *PolyhedralValueInfo::getPEXP(Value *V, Loop *Scope) const {
++const PEXP *PolyhedralValueInfo::getPEXP(Value *V, Loop *Scope, bool Strict,
++                                         bool NoAlias) const {
+   PEBuilder->setScope(Scope);
+-  return PEBuilder->visit(*V);
++  PEXP *PE = PEBuilder->visit(*V);
++  if (Strict && !hasScope(PE, Scope, Strict, NoAlias))
++    return nullptr;
++  return PE;
+ }
+ 
+-const PEXP *PolyhedralValueInfo::getDomainFor(BasicBlock *BB,
+-                                              Loop *Scope) const {
++const PEXP *PolyhedralValueInfo::getDomainFor(BasicBlock *BB, Loop *Scope,
++                                              bool Strict, bool NoAlias) const {
+   PEBuilder->setScope(Scope);
+-  return PEBuilder->getDomain(*BB);
++  PEXP *PE = PEBuilder->getDomain(*BB);
++  if (Strict && !hasScope(PE, Scope, Strict, NoAlias))
++    return nullptr;
++  return PE;
+ }
+ 
+ const PEXP *PolyhedralValueInfo::getBackedgeTakenCount(const Loop &L,
+-                                                       Loop *Scope) const {
++                                                       Loop *Scope, bool Strict,
++                                                       bool NoAlias) const {
+   if (PVIDisable)
+     return nullptr;
+   PEBuilder->setScope(Scope);
+-  return PEBuilder->getBackedgeTakenCount(L);
++  PEXP *PE = PEBuilder->getBackedgeTakenCount(L);
++  if (Strict && !hasScope(PE, Scope, Strict, NoAlias))
++    return nullptr;
++  return PE;
+ }
+ 
+ PVId PolyhedralValueInfo::getParameterId(Value &V) const {
+@@ -301,14 +313,57 @@ bool PolyhedralValueInfo::isNonAffine(const PEXP *PE) const {
+   return PE->Kind == PEXP::EK_NON_AFFINE;
+ }
+ 
++bool PolyhedralValueInfo::isVaryingInScope(Instruction &I,
++                                           const Region &RegionScope,
++                                           bool Strict, bool NoAlias) const {
++  if (!RegionScope.contains(&I))
++    return false;
++  if (Strict)
++    return true;
++  if (I.mayReadFromMemory()) {
++    if (!NoAlias)
++      return true;
++    if (!isa<LoadInst>(I))
++      return true;
++    Value *Ptr = cast<LoadInst>(&I)->getPointerOperand();
++    if (!isa<Instruction>(Ptr))
++      return false;
++    return isVaryingInScope(*cast<Instruction>(Ptr), RegionScope, Strict, NoAlias);
++  }
++
++  Loop *L = nullptr;
++  if (auto *PHI = dyn_cast<PHINode>(&I)) {
++    L = LI.isLoopHeader(PHI->getParent()) ? LI.getLoopFor(PHI->getParent()) : L;
++    if (L)
++      return RegionScope.contains(L);
++  }
++
++  for (Value *Op : I.operands())
++    if (auto *OpI = dyn_cast<Instruction>(Op)) {
++      if (L && L->contains(OpI))
++        continue;
++      if (isVaryingInScope(*OpI, RegionScope, Strict, NoAlias))
++        return true;
++    }
++  return false;
++}
++
+ bool PolyhedralValueInfo::isVaryingInScope(Instruction &I, Loop *Scope,
+-                                           bool Strict) const {
++                                           bool Strict, bool NoAlias) const {
+   if (Scope && !Scope->contains(&I))
+     return false;
+   if (Strict)
+     return true;
+-  if (I.mayReadFromMemory())
+-    return true;
++  if (I.mayReadFromMemory()) {
++    if (!NoAlias)
++      return true;
++    if (!isa<LoadInst>(I))
++      return true;
++    Value *Ptr = cast<LoadInst>(&I)->getPointerOperand();
++    if (!isa<Instruction>(Ptr))
++      return false;
++    return isVaryingInScope(*cast<Instruction>(Ptr), Scope, Strict, NoAlias);
++  }
+ 
+   Loop *L = nullptr;
+   if (auto *PHI = dyn_cast<PHINode>(&I)) {
+@@ -323,16 +378,38 @@ bool PolyhedralValueInfo::isVaryingInScope(Instruction &I, Loop *Scope,
+     if (auto *OpI = dyn_cast<Instruction>(Op)) {
+       if (L && L->contains(OpI))
+         continue;
+-      if (isVaryingInScope(*OpI, Scope, Strict))
++      if (isVaryingInScope(*OpI, Scope, Strict, NoAlias))
+         return true;
+     }
+   return false;
+ }
+ 
++bool PolyhedralValueInfo::hasScope(Value &V, const Region &RegionScope,
++                                   bool Strict, bool NoAlias) const {
++  auto *I = dyn_cast<Instruction>(&V);
++  if (!I || !isVaryingInScope(*I, RegionScope, Strict, NoAlias))
++    return true;
++
++  DEBUG(dbgs() << "Value " << V << " does not have scope "
++               << RegionScope.getNameStr() << "\n");
++  return false;
++}
++
++bool PolyhedralValueInfo::hasScope(const PEXP *PE, const Region &RegionScope,
++                                   bool Strict, bool NoAlias) const {
++
++  SmallVector<Value *, 4> Values;
++  getParameters(PE, Values);
++  for (Value *V : Values)
++    if (!hasScope(*V, RegionScope, Strict, NoAlias))
++      return false;
++  return true;
++}
++
+ bool PolyhedralValueInfo::hasScope(Value &V, Loop *Scope,
+-                                   bool Strict) const {
++                                   bool Strict, bool NoAlias) const {
+   auto *I = dyn_cast<Instruction>(&V);
+-  if (!I || !isVaryingInScope(*I, Scope, Strict))
++  if (!I || !isVaryingInScope(*I, Scope, Strict, NoAlias))
+     return true;
+ 
+   DEBUG(dbgs() << "Value " << V << " does not have scope "
+@@ -341,12 +418,12 @@ bool PolyhedralValueInfo::hasScope(Value &V, Loop *Scope,
+ }
+ 
+ bool PolyhedralValueInfo::hasScope(const PEXP *PE, Loop *Scope,
+-                                   bool Strict) const {
++                                   bool Strict, bool NoAlias) const {
+ 
+   SmallVector<Value *, 4> Values;
+   getParameters(PE, Values);
+   for (Value *V : Values)
+-    if (!hasScope(*V, Scope, Strict))
++    if (!hasScope(*V, Scope, Strict, NoAlias))
+       return false;
+   return true;
+ }
+@@ -373,15 +450,53 @@ bool PolyhedralValueInfo::mayBeInfinite(Loop &L) const {
+ }
+ 
+ void PolyhedralValueInfo::getParameters(const PEXP *PE,
+-                                        SmallVectorImpl<PVId> &Values) const {
++                                        SmallVectorImpl<PVId> &Values,
++                                        bool Recursive) const {
++  unsigned u = Values.size();
+   const PVAff &PWA = PE->getPWA();
+   PWA.getParameters(Values);
++  if (!Recursive)
++    return;
++
++  unsigned e = Values.size();
++  assert(u <= e);
++  Loop *Scope = PE->getScope();
++  for (; u < e; u++) {
++    Instruction *I = dyn_cast<Instruction>(Values[u].getPayloadAs<Value *>());
++    if (!I || (Scope && !Scope->contains(I)))
++      continue;
++    if (I == PE->getValue())
++      continue;
++    // TODO PHIS
++    if (isa<PHINode>(I) && LI.isLoopHeader(I->getParent()))
++      continue;
++    getParameters(getPEXP(I, Scope, false), Values);
++  }
+ }
+ 
+-void PolyhedralValueInfo::getParameters(
+-    const PEXP *PE, SmallVectorImpl<Value *> &Values) const {
++void PolyhedralValueInfo::getParameters(const PEXP *PE,
++                                        SmallVectorImpl<Value *> &Values,
++                                        bool Recursive) const {
++  unsigned u = Values.size();
+   const PVAff &PWA = PE->getPWA();
+   PWA.getParameters(Values);
++  if (!Recursive)
++    return;
++
++  unsigned e = Values.size();
++  assert(u <= e);
++  Loop *Scope = PE->getScope();
++  for (; u < e; u++) {
++    Instruction *I = dyn_cast<Instruction>(Values[u]);
++    if (!I || (Scope && !Scope->contains(I)))
++      continue;
++    if (I == PE->getValue())
++      continue;
++    // TODO PHIS
++    if (isa<PHINode>(I) && LI.isLoopHeader(I->getParent()))
++      continue;
++    getParameters(getPEXP(I, Scope, false), Values);
++  }
+ }
+ 
+ bool PolyhedralValueInfo::isKnownToHold(Value *LHS, Value *RHS,
+@@ -422,7 +537,21 @@ bool PolyhedralValueInfo::isKnownToHold(Value *LHS, Value *RHS,
+   return FalseDomain.isEmpty();
+ }
+ 
+-void PolyhedralValueInfo::print(raw_ostream &OS) const {}
++void PolyhedralValueInfo::print(raw_ostream &OS) const {
++  auto &PVIC = PEBuilder->getPolyhedralValueInfoCache();
++  errs() << "\nDOMAINS:\n";
++  for (auto &It : PVIC.domains()) {
++    Loop *L = It.first.second;
++    OS << "V: " << It.first.first->getName() << " in "
++       << (L ? L->getName() : "<max>") << ":\n\t" << It.second << "\n";
++  }
++  errs() << "\nVALUES:\n";
++  for (auto &It : PVIC) {
++    Loop *L = It.first.second;
++    OS << "V: " << *It.first.first << " in " << (L ? L->getName() : "<max>")
++       << ":\n\t" << It.second << "\n";
++  }
++}
+ 
+ // ------------------------------------------------------------------------- //
+ 
+diff --git a/lib/Transforms/IPO/PassManagerBuilder.cpp b/lib/Transforms/IPO/PassManagerBuilder.cpp
+index 3855e62..9ac9afa 100644
+--- a/lib/Transforms/IPO/PassManagerBuilder.cpp
++++ b/lib/Transforms/IPO/PassManagerBuilder.cpp
+@@ -590,6 +590,7 @@ void PassManagerBuilder::populateModulePassManager(
+   MPM.add(createFloat2IntPass());
+ 
+   addExtensionsToPM(EP_VectorizerStart, MPM);
++  //MPM.add(createPolyhedralValueTransformerWrapperPass());
+ 
+   // Re-rotate loops in all our loop nests. These may have fallout out of
+   // rotated form due to GVN or other transformations, and the vectorizer relies
+diff --git a/lib/Transforms/Scalar/CMakeLists.txt b/lib/Transforms/Scalar/CMakeLists.txt
+index 0562d38..60d0cb1 100644
+--- a/lib/Transforms/Scalar/CMakeLists.txt
++++ b/lib/Transforms/Scalar/CMakeLists.txt
+@@ -50,6 +50,7 @@ add_llvm_library(LLVMScalarOpts
+   NewGVN.cpp
+   PartiallyInlineLibCalls.cpp
+   PlaceSafepoints.cpp
++  PolyhedralValueTransformer.cpp
+   Reassociate.cpp
+   Reg2Mem.cpp
+   RewriteStatepointsForGC.cpp
+diff --git a/lib/Transforms/Scalar/PolyhedralValueTransformer.cpp b/lib/Transforms/Scalar/PolyhedralValueTransformer.cpp
+new file mode 100644
+index 0000000..7a4b3d6
+--- /dev/null
++++ b/lib/Transforms/Scalar/PolyhedralValueTransformer.cpp
+@@ -0,0 +1,396 @@
++//===--- PolyhedralValueTransformer.cpp -- Polyhedral value transformer ---===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/Transforms/Scalar/PolyhedralValueTransformer.h"
++
++#include "llvm/ADT/Statistic.h"
++#include "llvm/Analysis/AliasSetTracker.h"
++#include "llvm/Analysis/LoopInfo.h"
++#include "llvm/Analysis/PolyhedralValueInfo.h"
++#include "llvm/Analysis/PostDominators.h"
++#include "llvm/Analysis/ValueTracking.h"
++#include "llvm/IR/LegacyPassManager.h"
++#include "llvm/IR/Dominators.h"
++#include "llvm/Passes/PassBuilder.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/raw_ostream.h"
++#include "llvm/Transforms/IPO/PassManagerBuilder.h"
++#include "llvm/Transforms/Scalar.h"
++
++#include <cassert>
++
++using namespace llvm;
++
++#define DEBUG_TYPE "polyhedral-value-transformer"
++
++STATISTIC(NUM_PARTIALLY_VALID_CONDITIONS, "Number of partially valid conditions");
++STATISTIC(NUM_ALWAYS_VALID_CONDITIONS, "Number of always valid conditions");
++STATISTIC(NUM_PARTIALLY_VALID_CONDITION_DOMAINS, "Number of partially valid condition domains");
++STATISTIC(NUM_CONDITIONS_IN_LOOP, "Number of conditions in loops");
++STATISTIC(NUM_LATCH_CONDITIONS, "Number of latch conditions");
++STATISTIC(NUM_EXIT_CONDITIONS, "Number of exit conditions");
++STATISTIC(NUM_ALWAYS_VALID_CONDITION_DOMAINS, "Number of always valid condition domains");
++STATISTIC(NUM_HOISTABLE_CONDITIONS, "Number of hoistable (always valid) conditions");
++STATISTIC(NUM_HOISTABLE_LATCH_CONDITIONS, "Number of hoistable (always valid) latch conditions");
++STATISTIC(NUM_HOISTABLE_EXIT_CONDITIONS, "Number of hoistable (always valid) exit conditions");
++STATISTIC(NUM_ALWAYS_TAKEN_CONDITIONS, "Number of always taken (always valid) conditions");
++STATISTIC(NUM_ALWAYS_TAKEN_LATCH_CONDITIONS, "Number of always taken (always valid) latch conditions");
++STATISTIC(NUM_ALWAYS_TAKEN_EXIT_CONDITIONS, "Number of always taken (always valid) exit conditions");
++STATISTIC(NUM_NEVER_TAKEN_CONDITIONS, "Number of never taken (always valid) conditions");
++STATISTIC(NUM_NEVER_TAKEN_LATCH_CONDITIONS, "Number of never taken (always valid) latch conditions");
++STATISTIC(NUM_NEVER_TAKEN_EXIT_CONDITIONS, "Number of never taken (always valid) exit conditions");
++STATISTIC(NUM_PARTIALLY_HOISTABLE_CONDITIONS, "Number of hoistable (partially valid) conditions");
++STATISTIC(NUM_PARTIALLY_HOISTABLE_LATCH_CONDITIONS, "Number of hoistable (partially valid) latch conditions");
++STATISTIC(NUM_PARTIALLY_HOISTABLE_EXIT_CONDITIONS, "Number of hoistable (partially valid) exit conditions");
++STATISTIC(NUM_PARTIALLY_ALWAYS_TAKEN_CONDITIONS, "Number of always taken (partially valid) conditions");
++STATISTIC(NUM_PARTIALLY_ALWAYS_TAKEN_LATCH_CONDITIONS, "Number of always taken (partially valid) latch conditions");
++STATISTIC(NUM_PARTIALLY_ALWAYS_TAKEN_EXIT_CONDITIONS, "Number of always taken (partially valid) exit conditions");
++STATISTIC(NUM_PARTIALLY_NEVER_TAKEN_CONDITIONS, "Number of never taken (partially valid) conditions");
++STATISTIC(NUM_PARTIALLY_NEVER_TAKEN_LATCH_CONDITIONS, "Number of never taken (partially valid) latch conditions");
++STATISTIC(NUM_PARTIALLY_NEVER_TAKEN_EXIT_CONDITIONS, "Number of never taken (partially valid) exit conditions");
++
++STATISTIC(NUM_INT_DIFF, "Number of integer differences");
++STATISTIC(NUM_CST_DIFF, "Number of constant differences");
++STATISTIC(NUM_ONE_LOOP_DIFF, "Number of differences involving one loop");
++STATISTIC(NUM_ONE_LOOP_DIFF_ONE_PARAM, "Number of differences involving one loop and one param");
++
++static cl::opt<bool> PVTEnabled("pvt", cl::desc("Enable pvt"), cl::init(false),
++                                cl::ZeroOrMore);
++
++// ------------------------------------------------------------------------- //
++
++PolyhedralValueTransformer::PolyhedralValueTransformer(
++    PolyhedralValueInfo &PVI, AliasAnalysis &AA, LoopInfo &LI)
++    : PVI(PVI), AA(AA), LI(LI) {}
++
++PolyhedralValueTransformer::~PolyhedralValueTransformer() { releaseMemory(); }
++
++bool PolyhedralValueTransformer::hoistConditions(Loop &L) {
++  errs() << "CHECK Loop: " << L.getName() << "\n";
++
++  for (BasicBlock *BB : L.blocks()) {
++    errs() << "  CHECK BB: " << BB->getName() << "\n";
++    TerminatorInst *TI = BB->getTerminator();
++    BranchInst *BI = dyn_cast<BranchInst>(TI);
++    if (!BI || BI->getNumSuccessors() == 1)
++      continue;
++    NUM_CONDITIONS_IN_LOOP++;
++
++    bool IsExit = false, IsLatch = false;
++    if (LI.getLoopFor(BB) != LI.getLoopFor(BI->getSuccessor(0)) ||
++        LI.getLoopFor(BB) != LI.getLoopFor(BI->getSuccessor(1)))
++      IsExit = true;
++    if ((LI.isLoopHeader(BI->getSuccessor(0)) &&
++          LI.getLoopFor(BI->getSuccessor(0))->contains(BB)) ||
++        (LI.isLoopHeader(BI->getSuccessor(1)) &&
++          LI.getLoopFor(BI->getSuccessor(1))->contains(BB)))
++      IsLatch = true;
++
++    NUM_EXIT_CONDITIONS += IsExit;
++    NUM_LATCH_CONDITIONS += IsLatch;
++
++    Value *Condition = BI->getCondition();
++    const PEXP *ConditionPEXP = PVI.getPEXP(Condition, L.getParentLoop());
++    if (!ConditionPEXP || !PVI.isAffine(ConditionPEXP) || !PVI.hasScope(ConditionPEXP, L.getParentLoop(), false))
++      continue;
++
++    const PEXP *DomainPEXP = PVI.getDomainFor(BB, L.getParentLoop());
++    if (!DomainPEXP || !PVI.isAffine(DomainPEXP) || !PVI.hasScope(DomainPEXP, L.getParentLoop(), false))
++      continue;
++    bool ValidCond = PVI.isAlwaysValid(ConditionPEXP);
++    if (ValidCond) {
++      NUM_ALWAYS_VALID_CONDITIONS++;
++    } else {
++      NUM_PARTIALLY_VALID_CONDITIONS++;
++    }
++    bool DomainCond = PVI.isAlwaysValid(DomainPEXP);
++    if (DomainCond) {
++      NUM_ALWAYS_VALID_CONDITION_DOMAINS++;
++    } else {
++      NUM_PARTIALLY_VALID_CONDITION_DOMAINS++;
++    }
++
++
++    PVAff ConditionPVAff = ConditionPEXP->getPWA();
++    errs() << "VALID CONDITION PVAFF: " << ConditionPVAff << " for : " << *Condition << "\n";
++    errs() << "VALID CONDITION DOMAIN: " << DomainPEXP << " for : " << BB->getName() << "\n";
++    ConditionPVAff.intersectDomain(DomainPEXP->getDomain());
++    errs() << "VALID CONDITION PVAFF: " << ConditionPVAff << " for : " << *Condition << "\n";
++
++    unsigned DepthDiff = LI.getLoopFor(BB)->getLoopDepth() - L.getLoopDepth();
++    ConditionPVAff.dropLastInputDims(DepthDiff + 1);
++    errs() << "WITHOUT LAST " << DepthDiff + 1 << " DIMS: " << ConditionPVAff << "\n";
++
++    PVSet NotTakenConditions = ConditionPVAff.zeroSet();
++    errs() << "NOT TAKEN CONDITIONS " << NotTakenConditions << "\n";
++
++    if (ValidCond && DomainCond) {
++      if (NotTakenConditions.isEmpty()) {
++        NUM_ALWAYS_TAKEN_CONDITIONS++;
++        NUM_ALWAYS_TAKEN_EXIT_CONDITIONS += IsExit;
++        NUM_ALWAYS_TAKEN_LATCH_CONDITIONS += IsLatch;
++      } else if (NotTakenConditions.isUniverse()) {
++        NUM_NEVER_TAKEN_CONDITIONS++;
++        NUM_NEVER_TAKEN_EXIT_CONDITIONS += IsExit;
++        NUM_NEVER_TAKEN_LATCH_CONDITIONS += IsLatch;
++      } else {
++        NUM_HOISTABLE_CONDITIONS++;
++        NUM_HOISTABLE_EXIT_CONDITIONS += IsExit;
++        NUM_HOISTABLE_LATCH_CONDITIONS += IsLatch;
++        BI->getDebugLoc().print(errs());
++      }
++    } else {
++      if (NotTakenConditions.isEmpty()) {
++        NUM_PARTIALLY_ALWAYS_TAKEN_CONDITIONS++;
++        NUM_PARTIALLY_ALWAYS_TAKEN_EXIT_CONDITIONS += IsExit;
++        NUM_PARTIALLY_ALWAYS_TAKEN_LATCH_CONDITIONS += IsLatch;
++      } else if (NotTakenConditions.isUniverse()) {
++        NUM_PARTIALLY_NEVER_TAKEN_CONDITIONS++;
++        NUM_PARTIALLY_NEVER_TAKEN_EXIT_CONDITIONS += IsExit;
++        NUM_PARTIALLY_NEVER_TAKEN_LATCH_CONDITIONS += IsLatch;
++      } else {
++        NUM_PARTIALLY_HOISTABLE_CONDITIONS++;
++        NUM_PARTIALLY_HOISTABLE_EXIT_CONDITIONS += IsExit;
++        NUM_PARTIALLY_HOISTABLE_LATCH_CONDITIONS += IsLatch;
++        BI->getDebugLoc().print(errs());
++      }
++    }
++  }
++
++  for (Loop *SubL : L)
++    hoistConditions(*SubL);
++
++  return false;
++}
++
++bool PolyhedralValueTransformer::hoistConditions() {
++  bool Changed = false;
++
++  for (Loop *L : LI)
++    Changed |= hoistConditions(*L);
++
++  //PVI.print(errs());
++
++  return Changed;
++}
++
++static void collectUsers(Instruction *I, Loop &L, SmallPtrSetImpl<Instruction *> &Users) {
++  if (!I || !L.contains(I))
++    return;
++  if (!Users.insert(I).second)
++    return;
++  for (auto *User : I->users())
++    collectUsers(dyn_cast<Instruction>(User), L, Users);
++}
++
++bool PolyhedralValueTransformer::checkExpressions(Loop &L) {
++
++  DenseMap<Type *, SmallVector<Instruction *, 16>> TypeInstMap;
++  DenseMap<Instruction *, SmallPtrSet<Instruction *, 16>> UserMap;
++  for (BasicBlock *BB : L.blocks()) {
++    if (LI.getLoopFor(BB) != &L)
++      continue;
++    for (auto &Inst : *BB)
++      if (Inst.getType()->isIntegerTy() || Inst.getType()->isPointerTy()) {
++        TypeInstMap[Inst.getType()].push_back(&Inst);
++        collectUsers(&Inst, L, UserMap[&Inst]);
++      }
++  }
++
++  for (auto &It : TypeInstMap) {
++    auto &Insts = It.second;
++    unsigned NumEntries = Insts.size();
++    errs() << "\nTYPE: " << *It.first << " [#" << NumEntries << "]\n";
++    for (unsigned u0 = 0; u0 < NumEntries; u0++) {
++      Instruction *I0 = Insts[u0];
++      const PEXP *I0PEXP = nullptr;
++      for (unsigned u1 = u0 + 1; u1 < NumEntries; u1++) {
++        Instruction *I1 = Insts[u1];
++        if (UserMap[I0].count(I1) || UserMap[I1].count(I0))
++          continue;
++        if (!I0PEXP) {
++          I0PEXP = PVI.getPEXP(I0, L.getParentLoop());
++          if (!(I0PEXP && PVI.isAffine(I0PEXP) &&// PVI.isAlwaysValid(I0PEXP) &&
++              PVI.hasScope(I0PEXP, L.getParentLoop(), false)))
++            break;
++        }
++        const PEXP *I1PEXP = PVI.getPEXP(I1, L.getParentLoop());
++        if (!(I1PEXP && PVI.isAffine(I1PEXP) && //PVI.isAlwaysValid(I1PEXP) &&
++            PVI.hasScope(I1PEXP, L.getParentLoop(), false)))
++          continue;
++        PVAff DiffAff = PVAff::createSub(I0PEXP->getPWA(), I1PEXP->getPWA());
++        DiffAff.dropUnusedParameters();
++        bool IsInt = DiffAff.isInteger();
++        bool IsCst = DiffAff.isConstant();
++        errs() << "\t Inst0: " << *I0 << "\n\t Inst1: " << *I1 << "\n";
++        errs() << "\t PEXP0: " << I0PEXP << "\n\t PEXP1: " << I1PEXP << "\n";
++        errs() << "\t Stats: [C: " << IsCst << "][I: " << IsInt << "][P: " << DiffAff.getNumParameters() << "]";
++        unsigned InvolvedDims = 0;
++        for (unsigned d = 0; d < DiffAff.getNumInputDimensions(); d++) {
++          bool InvolvesDim = DiffAff.involvesInput(d);
++          errs() << "[ID L" << d << ": " << InvolvesDim << "]";
++          InvolvedDims += InvolvesDim;
++        }
++        if (IsInt || (InvolvedDims == 1 && DiffAff.getNumParameters() == 0))
++          errs() << "\n\tGOOD DIFF: " << DiffAff << "!\n\n";
++        else
++          errs() << "\n\t Diff: " << DiffAff << "\n\n";
++
++        NUM_INT_DIFF += IsInt;
++        NUM_CST_DIFF += IsCst;
++        NUM_ONE_LOOP_DIFF += (InvolvedDims == 1 && DiffAff.getNumParameters() == 0);
++        NUM_ONE_LOOP_DIFF_ONE_PARAM += (InvolvedDims == 1 && DiffAff.getNumParameters() == 1);
++
++      }
++    }
++  }
++
++  for (Loop *SubL : L)
++    checkExpressions(*SubL);
++
++  return false;
++}
++
++bool PolyhedralValueTransformer::checkExpressions() {
++  bool Changed = false;
++
++  for (Loop *L : LI)
++    Changed |= checkExpressions(*L);
++
++  //PVI.print(errs());
++
++  return Changed;
++}
++
++bool PolyhedralValueTransformer::checkLoopIdioms(Loop &L) {
++  const DataLayout &DL = L.getHeader()->getModule()->getDataLayout();
++  AliasSetTracker AST(AA);
++
++  DenseMap<Value *, SmallPtrSet<StoreInst *, 8>> Obj2StoresMap;
++  for (BasicBlock *BB : L.blocks()) {
++    for (Instruction &I : *BB) {
++      if (I.mayThrow()) {
++        errs() << "may throw: " << I << "\n";
++        return false;
++      }
++      if (!I.mayReadOrWriteMemory())
++        continue;
++
++      AST.add(&I);
++
++      StoreInst *SI = dyn_cast<StoreInst>(&I);
++      if (!SI || !SI->isUnordered() || SI->isVolatile())
++        continue;
++      if (SI->getMetadata(LLVMContext::MD_nontemporal))
++        continue;
++
++      Value *Ptr = SI->getPointerOperand();
++      errs() << " Ptr: " << *Ptr << "\n";
++      Value *Obj = GetUnderlyingObject(Ptr, DL, 10);
++      errs() << " Obj: " << *Obj << "\n";
++      Obj2StoresMap[Obj].insert(SI);
++    }
++  }
++
++  errs() << " Objects:\n";
++  for (auto &It : Obj2StoresMap) {
++    errs() << " - " << *It.first << " #" << It.second.size() << " stores\n";
++    AAMDNodes AATags;
++    AliasSet *AS = AST.getAliasSetForPointerIfExists(
++        It.first, MemoryLocation::UnknownSize, AATags);
++    if (!AS)
++      continue;
++    errs() << "AliasSet: "; AS->dump();
++    for (auto &ASIt : *AS) {
++      errs() << "\n - " << *ASIt.getValue() << "";
++    }
++  }
++
++  for (Loop *SubL : L)
++    checkLoopIdioms(*SubL);
++}
++
++bool PolyhedralValueTransformer::checkLoopIdioms() {
++  bool Changed = false;
++
++  for (Loop *L : LI)
++    Changed |= checkLoopIdioms(*L);
++
++  return Changed;
++}
++
++
++void PolyhedralValueTransformer::releaseMemory() {}
++
++void PolyhedralValueTransformer::print(raw_ostream &OS) const {
++}
++
++void PolyhedralValueTransformer::dump() const { return print(dbgs()); }
++
++// ------------------------------------------------------------------------- //
++
++char PolyhedralValueTransformerWrapperPass::ID = 0;
++
++void PolyhedralValueTransformerWrapperPass::getAnalysisUsage(
++    AnalysisUsage &AU) const {
++  AU.addRequired<PolyhedralValueInfoWrapperPass>();
++  AU.addRequired<AAResultsWrapperPass>();
++  AU.addRequired<LoopInfoWrapperPass>();
++  AU.setPreservesAll();
++}
++
++void PolyhedralValueTransformerWrapperPass::releaseMemory() {
++  delete PVT;
++
++  F = nullptr;
++  PVT = nullptr;
++}
++
++bool PolyhedralValueTransformerWrapperPass::runOnFunction(Function &F) {
++  F.dump();
++
++  AliasAnalysis &AA = getAnalysis<AAResultsWrapperPass>().getAAResults();
++  auto &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
++  auto &PVI = getAnalysis<PolyhedralValueInfoWrapperPass>()
++                  .getPolyhedralValueInfo();
++  PVT = new PolyhedralValueTransformer(PVI, AA, LI);
++  //PVT->hoistConditions();
++  //PVT->checkExpressions();
++  PVT->checkLoopIdioms();
++
++  this->F = &F;
++  return false;
++}
++
++void PolyhedralValueTransformerWrapperPass::print(raw_ostream &OS,
++                                                  const Module *M) const {
++  PVT->print(OS);
++}
++
++FunctionPass *llvm::createPolyhedralValueTransformerWrapperPass() {
++  initializePolyhedralValueTransformerWrapperPassPass(
++      *PassRegistry::getPassRegistry());
++  return new PolyhedralValueTransformerWrapperPass();
++}
++
++void PolyhedralValueTransformerWrapperPass::dump() const {
++  return print(dbgs(), nullptr);
++}
++
++INITIALIZE_PASS_BEGIN(PolyhedralValueTransformerWrapperPass,
++                      "polyhedral-value-transformer", "Polyhedral vt", false,
++                      false);
++INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
++INITIALIZE_PASS_DEPENDENCY(PolyhedralValueInfoWrapperPass);
++INITIALIZE_PASS_END(PolyhedralValueTransformerWrapperPass,
++                    "polyhedral-value-transformer", "Polyhedral vt", false,
++                    false)
+diff --git a/lib/Transforms/Scalar/Scalar.cpp b/lib/Transforms/Scalar/Scalar.cpp
+index 3b99ddf..1281527 100644
+--- a/lib/Transforms/Scalar/Scalar.cpp
++++ b/lib/Transforms/Scalar/Scalar.cpp
+@@ -95,6 +95,7 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
+   initializeStraightLineStrengthReducePass(Registry);
+   initializePlaceBackedgeSafepointsImplPass(Registry);
+   initializePlaceSafepointsPass(Registry);
++  initializePolyhedralValueTransformerWrapperPassPass(Registry);
+   initializeFloat2IntLegacyPassPass(Registry);
+   initializeLoopDistributeLegacyPass(Registry);
+   initializeLoopLoadEliminationPass(Registry);
+-- 
+1.8.3.1
+

@@ -1,0 +1,196 @@
+From 2a0a12b0e824e5a82134e8f4bd83265c166ba0b6 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Thu, 13 Sep 2018 01:51:20 +0200
+Subject: [PATCH 25/29] Try to make things work
+
+---
+ include/llvm/Analysis/PValue.h          |  1 +
+ include/llvm/Analysis/PolyhedralUtils.h |  2 ++
+ lib/Analysis/PValue.cpp                 | 20 ++++++++++++-
+ lib/Analysis/PolyhedralAccessInfo.cpp   | 52 +++++++++++++++++++++++++++------
+ 4 files changed, 65 insertions(+), 10 deletions(-)
+
+diff --git a/include/llvm/Analysis/PValue.h b/include/llvm/Analysis/PValue.h
+index ca6ea3a..77a8f12 100644
+--- a/include/llvm/Analysis/PValue.h
++++ b/include/llvm/Analysis/PValue.h
+@@ -398,6 +398,7 @@ public:
+   void eliminateParameter(const PVId &Id);
+ 
+   bool involvesId(const PVId &Id) const;
++  bool involvesIdInOutput(const PVId &Id) const;
+   bool involvesInput(unsigned Dim) const;
+ 
+   void addInputDims(unsigned Dims);
+diff --git a/include/llvm/Analysis/PolyhedralUtils.h b/include/llvm/Analysis/PolyhedralUtils.h
+index dfe7e5f..3e3f2aa 100644
+--- a/include/llvm/Analysis/PolyhedralUtils.h
++++ b/include/llvm/Analysis/PolyhedralUtils.h
+@@ -84,6 +84,8 @@ struct NVVMRewriter : public PVRewriter<PVType> {
+       case Intrinsic::nvvm_read_ptx_sreg_nctaid_x: return "nvvm_nctaid_x";
+       case Intrinsic::nvvm_read_ptx_sreg_nctaid_y: return "nvvm_nctaid_y";
+       case Intrinsic::nvvm_read_ptx_sreg_nctaid_z: return "nvvm_nctaid_z";
++      default:
++        break;
+     }
+     return "";
+   }
+diff --git a/lib/Analysis/PValue.cpp b/lib/Analysis/PValue.cpp
+index 4715cd1..5ecb03d 100644
+--- a/lib/Analysis/PValue.cpp
++++ b/lib/Analysis/PValue.cpp
+@@ -754,7 +754,7 @@ void PVMap::getParameters(SmallVectorImpl<llvm::Value *> &Parameters) const {
+  *        -> { [i0] -> [o0] : 8i0 <= o0 < 8i0+4 }
+  */
+ PVMap PVMap::smudgeBytes(int bytesize) const {
+-  isl_map *orig = Obj; // 
++  isl_map *orig = Obj; //
+   isl_ctx *ctx = isl_map_get_ctx(orig);
+ 
+   int outDims = isl_map_dim(orig, isl_dim_out);
+@@ -1134,6 +1134,24 @@ void PVAff::equateParameters(const PVId &Id0, const PVId &Id1) {
+ bool PVAff::involvesId(const PVId &Id) const {
+   return getParameterPosition(Id) >= 0;
+ }
++struct Helper {
++  int Dim;
++  bool InvolvesDim;
++};
++static isl_stat involvesIdInOutputHelper(isl_set *Dom, isl_aff *Aff, void *User) {
++  Helper &H = *static_cast<Helper *>(User);
++  H.InvolvesDim |= isl_aff_involves_dims(Aff, isl_dim_param, H.Dim, 1);
++  isl_set_free(Dom);
++  isl_aff_free(Aff);
++  return isl_stat_ok;
++}
++bool PVAff::involvesIdInOutput(const PVId &Id) const {
++  int Pos = getParameterPosition(Id);
++  assert(Pos >= 0);
++  Helper H = {Pos, false};
++  isl_pw_aff_foreach_piece(Obj, involvesIdInOutputHelper, &H);
++  return H.InvolvesDim;
++}
+ 
+ bool PVAff::involvesInput(unsigned Dim) const {
+   assert(Dim <= getNumInputDimensions());
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index ae9b386..193f493 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -89,6 +89,23 @@ static uint64_t getElementSize(Value *Pointer, const DataLayout &DL) {
+   return DL.getTypeStoreSize(PointerTy->getPointerElementType());
+ }
+ 
++static bool isNVVMIdxCall(PolyhedralValueInfo &PI, const PEXP *PE) {
++  if (!PI.isUnknown(PE))
++    return false;
++  auto *II = dyn_cast<IntrinsicInst>(PE->getValue());
++  if (!II)
++    return false;
++  switch (II->getIntrinsicID()) {
++    case Intrinsic::nvvm_read_ptx_sreg_ctaid_x:
++    case Intrinsic::nvvm_read_ptx_sreg_ctaid_y:
++    case Intrinsic::nvvm_read_ptx_sreg_ctaid_z:
++    case Intrinsic::nvvm_read_ptx_sreg_ctaid_w:
++      return true;
++    default:
++      return false;
++  }
++}
++
+ const PEXP *PACCSummary::findMultidimensionalViewSize(
+     PolyhedralValueInfo &PI, ArrayRef<const PEXP *> PEXPs,
+     DenseSet<std::pair<Instruction *, const PEXP *>>
+@@ -105,24 +122,29 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
+ 
+   SmallPtrSet<Value *, 4> DomainParameterSet;
+   DenseMap<Value *, SmallVector<const PEXP*, 4>> ExprParameterMap;
+-  SmallVector<Value *, 4> ParameterVector;
++  SmallVector<PVId, 4> ParameterVector;
+   for (const PEXP *PE : PEXPs) {
+     ParameterVector.clear();
+     PE->getPWA().getParameters(ParameterVector);
+-    for (Value *Parameter : ParameterVector)
+-      ExprParameterMap[Parameter].push_back(PE);
++    PVAff PVA = PE->getPWA();
++    for (const PVId &ParamId : ParameterVector)
++      if (PVA.involvesIdInOutput(ParamId)) {
++        errs() << "Param in pexp: " << *PE << " :: " << ParamId << "\n";
++        ExprParameterMap[ParamId.getPayloadAs<Value *>()].push_back(PE);
++      }
+     ParameterVector.clear();
+ 
+     PE->getDomain().getParameters(ParameterVector);
+-    DomainParameterSet.insert(ParameterVector.begin(), ParameterVector.end());
++    for (const PVId &ParamId : ParameterVector)
++      DomainParameterSet.insert(ParamId.getPayloadAs<Value *>());
+   }
+ 
+   DEBUG(dbgs() << "Found " << ExprParameterMap.size()
+                << " expression parameters\nFound " << DomainParameterSet.size()
+                << " domain parameters\n");
+ 
+-  for (Value *V : DomainParameterSet)
+-    ExprParameterMap.erase(V);
++  //for (Value *V : DomainParameterSet)
++    //ExprParameterMap.erase(V);
+ 
+   DenseMap<const PEXP *, SmallVector<std::pair<Instruction *, const PEXP *>, 4>>
+       PotentialSizes;
+@@ -147,9 +169,11 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
+     const PEXP *OpPE0 = PI.getPEXP(Op0, Scope);
+     const PEXP *OpPE1 = PI.getPEXP(Op1, Scope);
+ 
+-    if (PI.isUnknown(OpPE0) && OpPE0->getPWA().getNumInputDimensions() == 0)
++    if (PI.isUnknown(OpPE0) && OpPE0->getPWA().getNumInputDimensions() == 0 &&
++        !isNVVMIdxCall(PI, OpPE0))
+       PotentialSizes[OpPE0].push_back({I, OpPE1});
+-    if (PI.isUnknown(OpPE1) && OpPE1->getPWA().getNumInputDimensions() == 0)
++    if (PI.isUnknown(OpPE1) && OpPE1->getPWA().getNumInputDimensions() == 0 &&
++        !isNVVMIdxCall(PI, OpPE1))
+       PotentialSizes[OpPE1].push_back({I, OpPE0});
+   }
+ 
+@@ -173,6 +197,7 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
+   if (PotentialSizes.size()  == 1)
+     PotentialSize = PotentialSizes.begin()->first;
+   else {
++    SmallVector<Value *, 4> ParameterVector;
+     for (auto &It : PotentialSizes) {
+       ParameterVector.clear();
+       PI.getParameters(It.first, ParameterVector);
+@@ -298,6 +323,13 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+       SmallVector<PVAff, 4> DimPWAs;
+       DEBUG(dbgs() << "\n\nPWA:" << PWA << "\n");
+ 
++      SmallVector<PVId, 4> ParamIDs;
++      PI.getParameters(PA->getPEXP(), ParamIDs);
++      DEBUG({
++        for (const PVId &Id : ParamIDs)
++          dbgs() << " - " << Id << " : " << *Id.getPayloadAs<Value *>() << "\n";
++      });
++
+       SmallVector<SmallVector<std::pair<Instruction *, const PEXP *>, 4>, 4>
+           Dimensions;
+       Dimensions.resize(MDVI.DimensionSizes.size());
+@@ -337,7 +369,8 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+           PVAff Coeff = LastPWA.getParameterCoeff(PId);
+           DEBUG(dbgs() << "Coeff " << Coeff << "\n");
+           assert(!Coeff || Coeff.isConstant());
+-          if (!Coeff || Coeff.isEqual(PVAff(Coeff, 0)))
++          //if (!Coeff || Coeff.isEqual(PVAff(Coeff, 0)))
++          if (!Coeff)
+             continue;
+ 
+           PVAff &DimPWA = DimPWAs[LastDim - Dim - 1];
+@@ -367,6 +400,7 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+         }
+       }
+ 
++      errs() << "DimPWAs: " << DimPWAs.size() << " PAID: " << PA->getId() << "\n";
+       PVMap Map(DimPWAs, PA->getId());
+       Map.dropUnusedParameters();
+       DEBUG(dbgs() << "MAP: " << Map << "\n");
+-- 
+1.8.3.1
+

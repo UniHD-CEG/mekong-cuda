@@ -1,0 +1,62 @@
+From 8de16d67fc6d3f8d199982ef1bd46f63d20747f6 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Thu, 13 Sep 2018 13:58:27 +0200
+Subject: [PATCH 27/29] Do not create multiple dimensions for the block offset
+
+---
+ include/llvm/Analysis/PolyhedralUtils.h | 7 ++++---
+ lib/Analysis/PolyhedralAccessInfo.cpp   | 7 +++++++
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/include/llvm/Analysis/PolyhedralUtils.h b/include/llvm/Analysis/PolyhedralUtils.h
+index 9396504..8cb2f8c 100644
+--- a/include/llvm/Analysis/PolyhedralUtils.h
++++ b/include/llvm/Analysis/PolyhedralUtils.h
+@@ -28,15 +28,14 @@ struct NVVMRewriter : public PVRewriter<PVType> {
+   };
+ 
+   static constexpr unsigned NumNVVMDims = 4;
+-  NVVMDim NVVMDims[NumNVVMDims] = {NVVMDIM_X, NVVMDIM_Y, NVVMDIM_Z, NVVMDIM_W};
+   std::string NVVMDimNames[NumNVVMDims] = {"x", "y", "z", "w"};
+ 
+-  bool isIntrinsic(Value *V, Intrinsic::ID IntrId) {
++  static bool isIntrinsic(Value *V, Intrinsic::ID IntrId) {
+     auto *Intr = dyn_cast<IntrinsicInst>(V);
+     return Intr && Intr->getIntrinsicID() == IntrId;
+   }
+ 
+-  NVVMDim getBlockOffsetDim(Value *V) {
++  static NVVMDim getBlockOffsetDim(Value *V) {
+     auto *Inst = dyn_cast<Instruction>(V);
+     if (!Inst)
+       return NVVMDIM_NONE;
+@@ -57,6 +56,8 @@ struct NVVMRewriter : public PVRewriter<PVType> {
+         {Intrinsic::nvvm_read_ptx_sreg_ntid_w,
+          Intrinsic::nvvm_read_ptx_sreg_ctaid_w}};
+ 
++    NVVMDim NVVMDims[NumNVVMDims] = {NVVMDIM_X, NVVMDIM_Y, NVVMDIM_Z,
++                                     NVVMDIM_W};
+     for (unsigned d = 0; d < NumNVVMDims; d++) {
+       auto IdPair = IdPairs[d];
+       if ((isIntrinsic(Op0, IdPair.first) && isIntrinsic(Op1, IdPair.second)) ||
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 63a11f0..8dbb25e 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -166,6 +166,13 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
+       continue;
+     }
+ 
++    auto BlockOffsetDim = NVVMRewriter<PVMap>::getBlockOffsetDim(I);
++    if (BlockOffsetDim != NVVMRewriter<PVMap>::NVVMDIM_NONE) {
++      DEBUG(dbgs() << "\tSkip block offset in dimension: " << BlockOffsetDim
++                   << "\n");
++      continue;
++    }
++
+     DEBUG(dbgs() << "\tPossible multi dim view computation: " << *I << "\n");
+     Value *Op0 = I->getOperand(0);
+     Value *Op1 = I->getOperand(1);
+-- 
+1.8.3.1
+

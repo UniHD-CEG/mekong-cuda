@@ -1,0 +1,273 @@
+From dad2934f0a7659a4fafcc8f6fe0fca04262d7934 Mon Sep 17 00:00:00 2001
+From: Alexander Matz <alexander.matz@ziti.uni-heidelberg.de>
+Date: Tue, 7 Aug 2018 14:01:42 +0200
+Subject: [PATCH 18/29] added CHECK-LABELS in loops_1d_strided.ll to localize
+ failures
+
+---
+ test/Analysis/PolyhedralInfo/loops_1d_strided.ll | 32 ++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/test/Analysis/PolyhedralInfo/loops_1d_strided.ll b/test/Analysis/PolyhedralInfo/loops_1d_strided.ll
+index 2192df4..9ecd584 100644
+--- a/test/Analysis/PolyhedralInfo/loops_1d_strided.ll
++++ b/test/Analysis/PolyhedralInfo/loops_1d_strided.ll
+@@ -6,6 +6,7 @@ target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_slt_0
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 500 } [for.cond]
+ ; CHECK: { [i0] -> [(2i0)] } [indvars.iv]
+@@ -45,6 +46,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_slt_1
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 167 } [for.cond]
+ ; CHECK: { [i0] -> [(500 + 3i0)] } [indvars.iv]
+@@ -84,6 +86,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_slt_2
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 375 } [for.cond]
+ ; CHECK: { [i0] -> [(-500 + 4i0)] } [indvars.iv]
+@@ -123,6 +126,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_slt_3
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 + 5i0)] } [indvars.iv]
+@@ -161,6 +165,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sne_0
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(6i0)] } [indvars.iv]
+@@ -200,6 +205,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sne_1
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(500 + 7i0)] } [indvars.iv]
+@@ -239,6 +245,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sne_2
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(-500 + 8i0)] } [indvars.iv]
+@@ -278,6 +285,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sne_3
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 + 9i0)] } [indvars.iv]
+@@ -316,6 +324,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sgt_0_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 100 } [for.cond]
+ ; CHECK: { [i0] -> [(10i0)] } [indvars.iv]
+@@ -354,6 +363,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sgt_1_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 250 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 2i0)] } [indvars.iv]
+@@ -392,6 +402,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sgt_2_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 500 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 3i0)] } [indvars.iv]
+@@ -430,6 +441,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sgt_3_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 4i0)] } [indvars.iv]
+@@ -468,6 +480,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sne_0_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 200 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 5i0)] } [indvars.iv]
+@@ -506,6 +519,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sne_1_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 6i0)] } [indvars.iv]
+@@ -545,6 +559,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sne_2_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 7i0)] } [indvars.iv]
+@@ -584,6 +599,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_sne_3_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 8i0)] } [indvars.iv]
+@@ -622,6 +638,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_ult_0
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 500 } [for.cond]
+ ; CHECK: { [i0] -> [(2i0)] } [indvars.iv]
+@@ -660,6 +677,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_ult_1
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 167 } [for.cond]
+ ; CHECK: { [i0] -> [(500 + 3i0)] } [indvars.iv]
+@@ -698,6 +716,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_ult_2
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(4294966796 + 4i0)] } [indvars.iv]
+@@ -736,6 +755,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_ult_3
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 + 5i0)] } [indvars.iv]
+@@ -774,6 +794,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_une_0
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(6i0)] } [i.0]
+@@ -814,6 +835,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_une_1
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(500 + 7i0)] } [i.0]
+@@ -854,6 +876,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_une_2
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(-500 + 8i0)] } [i.0]
+@@ -894,6 +917,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_une_3
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 + 9i0)] } [indvars.iv]
+@@ -932,6 +956,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_ugt_0
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 100 } [for.cond]
+ ; CHECK: { [i0] -> [(10i0)] } [indvars.iv]
+@@ -970,6 +995,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_ugt_1_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 250 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 2i0)] } [indvars.iv]
+@@ -1008,6 +1034,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_ugt_2_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(1000 + 4294967293i0)] } [indvars.iv]
+@@ -1047,6 +1074,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_ugt_3_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 + 4294967292i0)] } [indvars.iv]
+@@ -1085,6 +1113,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_une_0_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : 0 <= i0 <= 200 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 5i0)] } [indvars.iv]
+@@ -1123,6 +1152,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_une_1_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 6i0)] } [i.0]
+@@ -1163,6 +1193,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_une_2_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: null [for.cond]
+ ; CHECK: { [i0] -> [(1000 - 7i0)] } [i.0]
+@@ -1203,6 +1234,7 @@ for.end:                                          ; preds = %for.cond.cleanup
+ ;        A[i]++;
+ ;   }
+ ;
++; CHECK-LABEL: d1_c_une_3_r
+ ; CHECK: { [] -> [(1)] } [entry]
+ ; CHECK: { [i0] -> [(1)] : i0 = 0 } [for.cond]
+ ; CHECK: { [i0] -> [(1000 + 4294967288i0)] } [indvars.iv]
+-- 
+1.8.3.1
+

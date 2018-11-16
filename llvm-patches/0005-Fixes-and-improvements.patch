@@ -1,0 +1,423 @@
+From d20aa676fe1db8f72b63cc2d86fd4dedd74dd8dd Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Fri, 15 Dec 2017 15:39:45 +0100
+Subject: [PATCH 05/29] Fixes and improvements
+
+---
+ include/llvm/Analysis/PValue.h               |  2 +-
+ include/llvm/Analysis/PolyhedralUtils.h      |  2 +-
+ lib/Analysis/PValue.cpp                      | 17 ++++----
+ lib/Analysis/PolyhedralAccessInfo.cpp        | 63 ++++++++++++++++++++--------
+ lib/Analysis/PolyhedralExpressionBuilder.cpp | 43 ++++++++++++++-----
+ lib/Analysis/PolyhedralValueInfo.cpp         | 34 ++++++++++++++-
+ 6 files changed, 121 insertions(+), 40 deletions(-)
+
+diff --git a/include/llvm/Analysis/PValue.h b/include/llvm/Analysis/PValue.h
+index 81ba36b..6976ac3 100644
+--- a/include/llvm/Analysis/PValue.h
++++ b/include/llvm/Analysis/PValue.h
+@@ -404,7 +404,7 @@ public:
+   /// @returns A reference to this object (*this).
+   PVAff &intersectDomain(const PVSet &S);
+ 
+-  PVAff &simplify(PVSet &S);
++  PVAff &simplify(const PVSet &S);
+ 
+   PVSet getLessThanDomain(const PVAff &Aff) const;
+   PVSet getLessEqualDomain(const PVAff &Aff) const;
+diff --git a/include/llvm/Analysis/PolyhedralUtils.h b/include/llvm/Analysis/PolyhedralUtils.h
+index 4c7571d..c4f03c6 100644
+--- a/include/llvm/Analysis/PolyhedralUtils.h
++++ b/include/llvm/Analysis/PolyhedralUtils.h
+@@ -17,7 +17,7 @@
+ 
+ namespace llvm {
+ 
+-template<typename PVType, bool UseGlobalIdx = true>
++template<typename PVType, bool UseGlobalIdx = false>
+ struct NVVMRewriter : public PVRewriter<PVType> {
+   enum NVVMDim {
+     NVVMDIM_NONE,
+diff --git a/lib/Analysis/PValue.cpp b/lib/Analysis/PValue.cpp
+index 52d467f..bf9f208 100644
+--- a/lib/Analysis/PValue.cpp
++++ b/lib/Analysis/PValue.cpp
+@@ -307,11 +307,7 @@ PVSet &PVSet::intersect(const PVSet &S) {
+     Obj = isl_set_copy(S.Obj);
+   else if (S.Obj) {
+     isl_set *SObj = S;
+-    isl_set_dump(Obj);
+-    isl_set_dump(SObj);
+     unifySetDimensions(Obj, SObj);
+-    isl_set_dump(Obj);
+-    isl_set_dump(SObj);
+     Obj = isl_set_intersect(Obj, SObj);
+     Obj = isl_set_coalesce(Obj);
+   }
+@@ -553,8 +549,9 @@ PVMap::PVMap(ArrayRef<PVAff> Affs, const PVId &Id) {
+   isl_space *Space = isl_space_alloc(Aff.getIslCtx(), 0,
+                                      Aff.getNumInputDimensions(), Affs.size());
+   isl_pw_multi_aff *MPWA = isl_pw_multi_aff_zero(Space);
+-  for (unsigned i = 0; i < Affs.size(); i++)
++  for (unsigned i = 0; i < Affs.size(); i++) {
+     MPWA = isl_pw_multi_aff_set_pw_aff(MPWA, i, Affs[i]);
++  }
+ 
+   Obj = isl_map_from_pw_multi_aff(MPWA);
+   assert(!isl_map_has_tuple_id(Obj, isl_dim_out));
+@@ -726,8 +723,6 @@ PVMap &PVMap::addToOutputDimension(const PVMap &Other, unsigned Dim) {
+   isl_map *OtherMap = Other;
+   OtherMap = isl_map_align_params(OtherMap, getSpace());
+   Obj = isl_map_align_params(Obj, isl_map_get_space(OtherMap));
+-  isl_map_dump(Obj);
+-  isl_map_dump(OtherMap);
+   Obj = isl_map_sum(Obj, OtherMap);
+   return *this;
+ }
+@@ -1065,12 +1060,16 @@ PVAff &PVAff::maxInLastInputDims(unsigned Dims) {
+   return *this;
+ }
+ 
+-PVAff &PVAff::simplify(PVSet &S) {
++PVAff &PVAff::simplify(const PVSet &S) {
++  if (!Obj)
++    return *this;
++
+   isl_set *Set;
+   int DimDiff = S.getNumInputDimensions() - getNumInputDimensions();
+   if (DimDiff > 0) {
+-    S.dropDimsFrom(S.getNumInputDimensions() - DimDiff);
++    unsigned Dim = S.getNumInputDimensions() - DimDiff;
+     Set = S;
++    Set = isl_set_project_out(Set, isl_dim_set, Dim, getNumInputDimensions() - Dim);
+   }
+   else if (DimDiff < 0)
+     Set = isl_set_add_dims(S, isl_dim_set, -DimDiff);
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 81ebf03..627f23d 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -138,13 +138,13 @@ PACCSummary::findMultidimensionalViewSize(PolyhedralValueInfo &PI,
+     Value *Op0 = I->getOperand(0);
+     Value *Op1 = I->getOperand(1);
+ 
+-    if (!isa<Instruction>(Op0))
++    const PEXP *OpPE0 = PI.getPEXP(Op0, Scope);
++    const PEXP *OpPE1 = PI.getPEXP(Op1, Scope);
++
++    if (PI.isUnknown(OpPE0))
+       PotentialSizes[Op0].push_back(std::make_pair(I, PI.getPEXP(Op1, Scope)));
+-    if (!isa<Instruction>(Op1))
++    if (PI.isUnknown(OpPE1))
+       PotentialSizes[Op1].push_back(std::make_pair(I, PI.getPEXP(Op0, Scope)));
+-
+-    DEBUG(if (isa<Instruction>(Op0) && isa<Instruction>(Op1)) dbgs()
+-              << "No non instruction operand found\n";);
+   }
+ 
+   DEBUG(dbgs() << "Found " << PotentialSizes.size() << " potential sizes\n");
+@@ -152,18 +152,36 @@ PACCSummary::findMultidimensionalViewSize(PolyhedralValueInfo &PI,
+     return nullptr;
+   }
+ 
+-  if (PotentialSizes.size() != 1) {
++  Value *PotentialSize = nullptr;
++  if (PotentialSizes.size()  == 1)
++    PotentialSize = PotentialSizes.begin()->getFirst();
++  else {
++    for (auto &It : PotentialSizes) {
++      if (It.second.size() > 1)
++        continue;
++      ParameterVector.clear();
++      PI.getParameters(PI.getPEXP(It.first, Scope), ParameterVector);
++      if (!std::all_of(ParameterVector.begin(), ParameterVector.end(),
++                       [](Value *P) { return isa<Argument>(P); }))
++        continue;
++      if (PotentialSize)
++        return nullptr;
++      PotentialSize = It.first;
++    }
++  }
++
++  if (!PotentialSize) {
+     DEBUG(dbgs() << "TODO: choose potential size!\n");
+     return nullptr;
+   }
+-  if (PotentialSizes.begin()->second.size() != 1) {
++  if (PotentialSizes[PotentialSize].size() != 1) {
+     DEBUG(dbgs() << "TODO: this is a hack!\n");
+     return nullptr;
+   }
+ 
+-  I = PotentialSizes.begin()->second.front().first;
+-  Rem = PotentialSizes.begin()->second.front().second;
+-  return PI.getPEXP(PotentialSizes.begin()->first, Scope);
++  I = PotentialSizes[PotentialSize].front().first;
++  Rem = PotentialSizes[PotentialSize].front().second;
++  return PI.getPEXP(PotentialSize, Scope);
+ }
+ 
+ void PACCSummary::findMultidimensionalView(PolyhedralValueInfo &PI,
+@@ -224,6 +242,9 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+ 
+     AI->ElementSize = getElementSize(PACCVector[0]->getPointer(), DL);
+     for (const PACC *PA : PACCVector) {
++      assert(PA);
++      assert(PA->getPEXP());
++      assert(PA->getPEXP()->getPWA());
+       // TODO: Also take the constant PA offset into account!
+       AI->ElementSize = GreatestCommonDivisor64(
+           AI->ElementSize, getElementSize(PA->getPointer(), DL));
+@@ -358,7 +379,7 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+     OS << "\tUnknown reads: None\n";
+   for (auto It = unknown_reads_begin(), End = unknown_reads_end(); It != End;
+        It++)
+-    OS << "\t - " << *It << "\n";
++    OS << "\t - " << **It << "\n";
+ 
+   if (getNumUnknownWrites())
+     OS << "\tUnknown writes:\n";
+@@ -366,7 +387,7 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+     OS << "\tUnknown writes: None\n";
+   for (auto It = unknown_writes_begin(), End = unknown_writes_end(); It != End;
+        It++)
+-    OS << "\t - " << *It << "\n";
++    OS << "\t - " << **It << "\n";
+ 
+   std::set<PVId> ParameterSet;
+   SmallVector<PVId, 8> ParameterVector;
+@@ -390,14 +411,20 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+ 
+     OS << "\tBase pointer: " << (BasePointer ? BasePointer->getName() : "<n/a>")
+        << "\n";
++    if (!AI->DimensionSizes.empty()) {
++      OS << "\t\tDimension sizes:\n";
++      for (const PEXP *DimSizePE : AI->DimensionSizes)
++        OS << "\t\t- " << DimSizePE->getPWA().str() << "\n";
++    }
+     if (AI->MayReadMap)
+-      OS << "\t\t  MayRead: " << AI->MayReadMap << "\n";
++      OS << "\t\tMayRead: " << AI->MayReadMap << "\n";
+     if (AI->MustReadMap)
+-      OS << "\t\t MustRead: " << AI->MustReadMap << "\n";
++      OS << "\t\tMustRead: " << AI->MustReadMap << "\n";
+     if (AI->MayWriteMap)
+-      OS << "\t\t MayWrite: " << AI->MayWriteMap << "\n";
++      OS << "\t\tMayWrite: " << AI->MayWriteMap << "\n";
+     if (AI->MustWriteMap)
+       OS << "\t\tMustWrite: " << AI->MustWriteMap << "\n";
++    OS << "\n";
+   }
+ 
+   OS << "Referenced parameters:\n";
+@@ -480,13 +507,15 @@ const PACC *PolyhedralAccessInfo::getAsAccess(Instruction &Inst, Value &Pointer,
+   PVId PtrValId = PI.getParameterId(*PtrVal);
+ 
+   const PEXP *PtrValPE = PI.getPEXP(PtrVal, Scope);
++
+   PEXP *AccessPE = new PEXP(&Inst, nullptr);
+   PEBuilder.assign(AccessPE, PointerPE, PtrValPE, PVAff::createSub);
+ 
+   PACC::AccessKind AccKind = IsWrite ? PACC::AK_WRITE : PACC::AK_READ;
+ 
+   const PEXP *Domain = PI.getDomainFor(Inst.getParent(), Scope);
+-  AccessPE->getPWA().intersectDomain(Domain->getDomain());
++  if (PI.isAffine(Domain))
++    AccessPE->getPWA().intersectDomain(Domain->getDomain());
+ 
+   AccessPA = new PACC(Pointer, *AccessPE, PtrValId, AccKind);
+   return AccessPA;
+@@ -595,7 +624,7 @@ bool PolyhedralAccessInfoWrapperPass::runOnFunction(Function &F) {
+ void PolyhedralAccessInfoWrapperPass::print(raw_ostream &OS,
+                                             const Module *) const {
+   PACCSummary *PS = PAI->getAccessSummary(*F, PACCSummary::SSK_COMPLETE);
+-  NVVMRewriter<PVMap, /* UseGlobalIdx */ true> CudaRewriter;
++  NVVMRewriter<PVMap, /* UseGlobalIdx */ false> CudaRewriter;
+   PS->rewrite(CudaRewriter);
+   PS->print(OS, &PAI->getPolyhedralValueInfo());
+ }
+diff --git a/lib/Analysis/PolyhedralExpressionBuilder.cpp b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+index 8ad9611..a92205e 100644
+--- a/lib/Analysis/PolyhedralExpressionBuilder.cpp
++++ b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+@@ -98,10 +98,11 @@ bool PolyhedralExpressionBuilder::assign(PEXP *PE, const PEXP *LHSPE,
+   PE->PWA = Combinator(PWA0, PWA1);
+ 
+   // Sanity test.
+-  unsigned NumDims = getRelativeLoopDepth(getLoopForPE(PE));
+-  (void) NumDims;
+-  assert(NumDims ==
+-         PE->PWA.getNumInputDimensions());
++  unsigned LoopDims = getRelativeLoopDepth(getLoopForPE(PE));
++  unsigned NumDims = PE->PWA.getNumInputDimensions();
++  assert(LoopDims >= NumDims);
++
++  PE->PWA.addInputDims(LoopDims - NumDims);
+ 
+   return PE->getKind() != PEXP::EK_NON_AFFINE;
+ }
+@@ -448,8 +449,13 @@ PEXP *PolyhedralExpressionBuilder::visitOperand(Value &Op, Instruction &I) {
+   return PE;
+ 
+   Instruction *OpI = dyn_cast<Instruction>(&Op);
+-  if (!OpI)
++  Loop *OpL = OpI ? PI.LI.getLoopFor(OpI->getParent()) : nullptr;
++  adjustDomainDimensions(PE->PWA, OpL, PI.LI.getLoopFor(I.getParent()), true);
++  return PE;
++
++  if (!OpI) {
+     return PE;
++  }
+ 
+   Loop *OpIL = PI.LI.getLoopFor(OpI->getParent());
+   unsigned NumDims = PE->getPWA().getNumInputDimensions();
+@@ -584,6 +590,8 @@ void PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj, Loop *OldL,
+ 
+   unsigned OldDepth = getRelativeLoopDepth(OldL);
+   unsigned NewDepth = getRelativeLoopDepth(NewL);
++  if (OldDepth == NewDepth && OldDepth == 0)
++    return;
+ 
+   // Sanity check
+   DEBUG(dbgs() << " OldDepth: " << OldDepth << " NewDepth: " << NewDepth
+@@ -594,7 +602,7 @@ void PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj, Loop *OldL,
+   //   1) The depth is the same but the loops are not.
+   //      => One loop was left one was entered.
+   //   2) The depth increased from OldL to NewL.
+-  //      => One loop was entered, none was left.
++  //      => Loops were entered, none was left.
+   //   3) The depth decreased from OldL to NewL.
+   //      => Loops were left were difference of the depths defines how many.
+   if (OldDepth == NewDepth) {
+@@ -604,8 +612,8 @@ void PolyhedralExpressionBuilder::adjustDomainDimensions(PVTy &Obj, Loop *OldL,
+     Obj.dropLastInputDims(1);
+     Obj.addInputDims(1);
+   } else if (OldDepth < NewDepth) {
+-    assert(OldDepth + 1 == NewDepth);
+-    Obj.addInputDims(1);
++    // TODO: one loop could be left
++    Obj.addInputDims(NewDepth - OldDepth);
+   } else {
+     assert(OldDepth > NewDepth);
+     unsigned DepthDiff = OldDepth - NewDepth;
+@@ -728,6 +736,7 @@ PolyhedralExpressionBuilder::visitGetElementPtrInst(GetElementPtrInst &I) {
+ 
+   auto *PE = getOrCreatePEXP(I);
+   *PE = *PtrPE;
++  adjustDomainDimensions(PE->PWA, PtrPE, PE, true);
+ 
+   auto *Ty = I.getPointerOperandType();
+   for (auto &Op : make_range(I.idx_begin(), I.idx_end())) {
+@@ -736,9 +745,21 @@ PolyhedralExpressionBuilder::visitGetElementPtrInst(GetElementPtrInst &I) {
+       return visitParameter(I);
+ 
+     if (Ty->isStructTy()) {
+-      // TODO: Struct
+-      DEBUG(dbgs() << "TODO: Struct ty " << *Ty << " for " << I << "\n");
+-      return visitParameter(I);
++      if (!PI.isConstant(PEOp)) {
++        DEBUG(dbgs() << "\nTODO: Non constant access to struct ty " << *Ty
++                     << " Op: " << *Op << " for " << I << "\n");
++        return visitParameter(I);
++      }
++      if (auto *ConstOp = dyn_cast<ConstantInt>(Op)) {
++        auto StructElementNo = ConstOp->getZExtValue();
++        assert(StructElementNo < Ty->getStructNumElements());
++        const StructLayout *Layout = DL.getStructLayout(cast<StructType>(Ty));
++        auto ElementOffset = Layout->getElementOffset(StructElementNo);
++        PVAff Offset(PE->PWA, ElementOffset);
++        Ty = Ty->getStructElementType(StructElementNo);
++        continue;
++      }
++      assert(0 && "TODO Constant OpPE but not constant Op!\n");
+     }
+ 
+     uint64_t Size = 0;
+diff --git a/lib/Analysis/PolyhedralValueInfo.cpp b/lib/Analysis/PolyhedralValueInfo.cpp
+index 6dc836f..5c07fd2 100644
+--- a/lib/Analysis/PolyhedralValueInfo.cpp
++++ b/lib/Analysis/PolyhedralValueInfo.cpp
+@@ -102,6 +102,10 @@ PEXP &PEXP::operator=(const PEXP &PE) {
+   InvalidDomain = PE.getInvalidDomain();
+   KnownDomain = PE.getKnownDomain();
+ 
++  // Sanity check
++  assert(!KnownDomain || KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++  assert(!InvalidDomain || InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++
+   return *this;
+ }
+ 
+@@ -111,6 +115,12 @@ PEXP &PEXP::operator=(PEXP &&PE) {
+   std::swap(InvalidDomain, PE.InvalidDomain);
+   std::swap(KnownDomain, PE.KnownDomain);
+ 
++  // Sanity check
++  assert(!KnownDomain ||
++         KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++  assert(!InvalidDomain ||
++         InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++
+   return *this;
+ }
+ 
+@@ -126,19 +136,36 @@ void PEXP::addInvalidDomain(const PVSet &ID) {
+     DEBUG(errs() << " => invalid domain is too complex. Invalidate!\n");
+     invalidate();
+   }
++
++  // Sanity check
++  assert(!KnownDomain || !PWA ||
++         KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++  assert(!InvalidDomain || !PWA ||
++         InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++  assert(!KnownDomain || !InvalidDomain ||
++         KnownDomain.getNumInputDimensions() ==
++             InvalidDomain.getNumInputDimensions());
+ }
+ 
+ void PEXP::addKnownDomain(const PVSet &KD) {
+   DEBUG(dbgs() << " KD increase: " << KD << " for " << getValue()->getName()
+                << "\n");
+   KnownDomain.intersect(KD);
+-  errs() << "New KD: " << KD << "\n";
+   if (KnownDomain.isComplex()) {
+     DEBUG(errs() << " => known domain is too complex. Drop it!\n");
+     KnownDomain = PVSet::universe(KnownDomain);
+   }
+   PWA.simplify(KnownDomain);
+   InvalidDomain.simplify(KD);
++
++  // Sanity check
++  assert(!KnownDomain || !PWA ||
++         KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++  assert(!InvalidDomain || !PWA ||
++         InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++  assert(!KnownDomain || !InvalidDomain ||
++         KnownDomain.getNumInputDimensions() ==
++             InvalidDomain.getNumInputDimensions());
+ }
+ 
+ PEXP *PEXP::invalidate() {
+@@ -164,6 +191,7 @@ void PEXP::adjustInvalidAndKnownDomain() {
+   if (HasNSW) {
+     PVSet BoundedDomain = PWA.getGreaterEqualDomain(LowerPWA).intersect(
+         PWA.getLessEqualDomain(UpperPWA));
++
+     KnownDomain.intersect(BoundedDomain);
+   } else {
+     PVSet BoundedDomain = LowerPWA.getGreaterEqualDomain(PWA).unify(
+@@ -171,6 +199,10 @@ void PEXP::adjustInvalidAndKnownDomain() {
+ 
+     InvalidDomain.unify(BoundedDomain);
+   }
++
++  // Sanity check
++  assert(!KnownDomain || KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++  assert(!InvalidDomain || InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
+ }
+ 
+ // ------------------------------------------------------------------------- //
+-- 
+1.8.3.1
+

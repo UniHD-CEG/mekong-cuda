@@ -1,0 +1,89 @@
+From 40049fb58653ed631e5343eb3088c1ceb7db80f0 Mon Sep 17 00:00:00 2001
+From: Alexander Matz <a.matz.1988@gmail.com>
+Date: Thu, 12 Jul 2018 14:23:38 +0200
+Subject: [PATCH 14/29] Moved CUDA intrinsic renaming into NVVMRewriter
+
+- no more CUDA specific code outside of NVVMRewriter
+---
+ include/llvm/Analysis/PolyhedralUtils.h      | 31 ++++++++++++++++++++++++++++
+ lib/Analysis/PolyhedralExpressionBuilder.cpp | 15 --------------
+ 2 files changed, 31 insertions(+), 15 deletions(-)
+
+diff --git a/include/llvm/Analysis/PolyhedralUtils.h b/include/llvm/Analysis/PolyhedralUtils.h
+index 31df41d..dfe7e5f 100644
+--- a/include/llvm/Analysis/PolyhedralUtils.h
++++ b/include/llvm/Analysis/PolyhedralUtils.h
+@@ -67,6 +67,27 @@ struct NVVMRewriter : public PVRewriter<PVType> {
+     return NVVMDIM_NONE;
+   }
+ 
++  std::string getCudaIntrinsicName(Value *V) {
++    auto *Intr = dyn_cast<IntrinsicInst>(V);
++    if (!Intr)
++      return "";
++    switch (Intr->getIntrinsicID()) {
++      case Intrinsic::nvvm_read_ptx_sreg_tid_x: return "nvvm_tid_x";
++      case Intrinsic::nvvm_read_ptx_sreg_tid_y: return "nvvm_tid_y";
++      case Intrinsic::nvvm_read_ptx_sreg_tid_z: return "nvvm_tid_z";
++      case Intrinsic::nvvm_read_ptx_sreg_ctaid_x: return "nvvm_ctaid_x";
++      case Intrinsic::nvvm_read_ptx_sreg_ctaid_y: return "nvvm_ctaid_y";
++      case Intrinsic::nvvm_read_ptx_sreg_ctaid_z: return "nvvm_ctaid_z";
++      case Intrinsic::nvvm_read_ptx_sreg_ntid_x: return "nvvm_ntid_x";
++      case Intrinsic::nvvm_read_ptx_sreg_ntid_y: return "nvvm_ntid_y";
++      case Intrinsic::nvvm_read_ptx_sreg_ntid_z: return "nvvm_ntid_z";
++      case Intrinsic::nvvm_read_ptx_sreg_nctaid_x: return "nvvm_nctaid_x";
++      case Intrinsic::nvvm_read_ptx_sreg_nctaid_y: return "nvvm_nctaid_y";
++      case Intrinsic::nvvm_read_ptx_sreg_nctaid_z: return "nvvm_nctaid_z";
++    }
++    return "";
++  }
++
+   virtual void rewrite(PVType &Obj) override {
+     SmallVector<PVId, 4> ThreadIdCallsPerDim[NumNVVMDims];
+ 
+@@ -112,6 +133,16 @@ struct NVVMRewriter : public PVRewriter<PVType> {
+       Obj.setParameter(d, BlockOffset[Dim]);
+     }
+ 
++    // must run after blockOffset resolution
++    for (unsigned d = 0, e = Obj.getNumParameters(); d < e; ++d) {
++      const PVId &Id = Obj.getParameter(d);
++      Value *IdValue = Id.getPayloadAs<Value *>();
++      std::string name = getCudaIntrinsicName(IdValue);
++      if (name != "") {
++        Obj.setParameter(d, PVId(Id, name, IdValue));
++      }
++    }
++
+     if (!UseGlobalIdx)
+       return;
+ 
+diff --git a/lib/Analysis/PolyhedralExpressionBuilder.cpp b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+index bc1cdd7..91e0f8a 100644
+--- a/lib/Analysis/PolyhedralExpressionBuilder.cpp
++++ b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+@@ -37,21 +37,6 @@ PolyhedralValueInfoCache::~PolyhedralValueInfoCache() {
+ }
+ 
+ std::string PolyhedralValueInfoCache::getParameterNameForValue(Value &V) {
+-  if (IntrinsicInst *Intr = dyn_cast<IntrinsicInst>(&V)) {
+-    switch (Intr->getIntrinsicID()) {
+-    case Intrinsic::nvvm_read_ptx_sreg_tid_x:
+-      return "nvvm_tid_x";
+-    case Intrinsic::nvvm_read_ptx_sreg_tid_y:
+-      return "nvvm_tid_y";
+-    case Intrinsic::nvvm_read_ptx_sreg_tid_z:
+-      return "nvvm_tid_z";
+-    case Intrinsic::nvvm_read_ptx_sreg_tid_w:
+-      return "nvvm_tid_w";
+-    default:
+-      break;
+-    }
+-  }
+-
+   if (V.hasName())
+     return V.getName().str();
+   return "p" + std::to_string(ParameterMap.size());
+-- 
+1.8.3.1
+

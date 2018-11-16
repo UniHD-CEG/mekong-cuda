@@ -1,0 +1,98 @@
+From c744cfe283e73d9b829323f68ad85770762c860d Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Wed, 11 Jul 2018 17:51:19 +0200
+Subject: [PATCH 13/29] Tried to fix mmult example but potentially broke
+ something else
+
+---
+ include/llvm/Analysis/PolyhedralAccessInfo.h |  2 +-
+ lib/Analysis/PolyhedralAccessInfo.cpp        | 24 +++++++++++++-----------
+ 2 files changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/include/llvm/Analysis/PolyhedralAccessInfo.h b/include/llvm/Analysis/PolyhedralAccessInfo.h
+index e3672ca..4f8d350 100644
+--- a/include/llvm/Analysis/PolyhedralAccessInfo.h
++++ b/include/llvm/Analysis/PolyhedralAccessInfo.h
+@@ -196,7 +196,7 @@ private:
+ 
+   const PEXP *findMultidimensionalViewSize(
+       PolyhedralValueInfo &PI, ArrayRef<const PEXP *> PEXPs,
+-      SmallVectorImpl<std::pair<Instruction *, const PEXP *>>
++      DenseSet<std::pair<Instruction *, const PEXP *>>
+           &InstsAndRemainders);
+ 
+   void findMultidimensionalView(PolyhedralValueInfo &PI,
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 9a6974d..f2a7f07 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -91,7 +91,7 @@ static uint64_t getElementSize(Value *Pointer, const DataLayout &DL) {
+ 
+ const PEXP *PACCSummary::findMultidimensionalViewSize(
+     PolyhedralValueInfo &PI, ArrayRef<const PEXP *> PEXPs,
+-    SmallVectorImpl<std::pair<Instruction *, const PEXP *>>
++    DenseSet<std::pair<Instruction *, const PEXP *>>
+         &InstsAndRemainders) {
+ 
+   if (PEXPs.empty())
+@@ -204,7 +204,7 @@ const PEXP *PACCSummary::findMultidimensionalViewSize(
+   }
+ 
+   for (auto &It : PotentialSizes[PotentialSize])
+-    InstsAndRemainders.push_back(It);
++    InstsAndRemainders.insert(It);
+   return PotentialSize;
+ }
+ 
+@@ -219,8 +219,9 @@ void PACCSummary::findMultidimensionalView(PolyhedralValueInfo &PI,
+   for (auto *PA : PACCs)
+     PEXPs.push_back(PA->getPEXP());
+ 
+-  SmallVector<std::pair<Instruction *, const PEXP *>, 8> InstsAndRemainders;
++  DenseSet<std::pair<Instruction *, const PEXP *>> InstsAndRemainders;
+   while (1) {
++    unsigned IARSize = InstsAndRemainders.size();
+     const PEXP *DimSize =
+         findMultidimensionalViewSize(PI, PEXPs, InstsAndRemainders);
+     DEBUG(dbgs() << "DimSize: " << DimSize << "\n");
+@@ -231,7 +232,8 @@ void PACCSummary::findMultidimensionalView(PolyhedralValueInfo &PI,
+ 
+     MDVI.DimensionSizes.push_back(DimSize);
+     unsigned CurDim = MDVI.DimensionSizes.size();
+-    for (auto &InstAndRemainder : InstsAndRemainders) {
++    for (const auto &InstAndRemainder : InstsAndRemainders) {
++      DEBUG(dbgs() << "Inst And Remainder: " << *InstAndRemainder.first << " : " << *InstAndRemainder.second << "\n");
+       auto &DimInfo = MDVI.DimensionInstsMap[InstAndRemainder.first];
+       PEXPs.push_back(InstAndRemainder.second);
+       if (!DimInfo.second)
+@@ -241,7 +243,7 @@ void PACCSummary::findMultidimensionalView(PolyhedralValueInfo &PI,
+         DimInfo.first = std::max(DimInfo.first, CurDim);
+       }
+     }
+-
++    InstsAndRemainders.clear();
+   }
+ }
+ 
+@@ -349,12 +351,12 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+ 
+           const PVAff &Size = AI->DimensionSizes[Dim]->getPWA();
+           DEBUG(dbgs() << "Size: " << Size << "\n");
+-          PVAff SizeFactor = LastPWA.extractFactor(Size);
+-          DEBUG(dbgs() << "SizeFactor: " << SizeFactor << "\n");
+-          if (SizeFactor) {
+-            DimPWA.add(SizeFactor);
+-            LastPWA.sub(SizeFactor.multiply(Size));
+-          }
++          //PVAff SizeFactor = LastPWA.extractFactor(Size);
++          //DEBUG(dbgs() << "SizeFactor: " << SizeFactor << "\n");
++          //if (SizeFactor) {
++            //DimPWA.add(SizeFactor);
++            //LastPWA.sub(SizeFactor.multiply(Size));
++          //}
+           LastPWA.sub(Coeff.multiply(PVAff(PId)));
+ 
+           DEBUG(dbgs() << "Dim: " << Dim << " => " << DimPWA << " [" << LastPWA
+-- 
+1.8.3.1
+

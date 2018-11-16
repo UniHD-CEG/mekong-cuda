@@ -1,0 +1,44 @@
+From 5a7bbfb8a6087e87fcdba68f511bc5f066df7837 Mon Sep 17 00:00:00 2001
+From: Alexander Matz <alexander.matz@ziti.uni-heidelberg.de>
+Date: Thu, 23 Aug 2018 15:45:14 +0200
+Subject: [PATCH 24/29] [WIP] Bugfixes Bytewise analysis
+
+---
+ lib/Analysis/PolyhedralAccessInfo.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 8c9da3e..ae9b386 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -413,6 +413,7 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+       // apply delayed element-size div
+       // Needs to take place after creating the smudged copy
+       Map = Map.floordiv(AI->ElementSize);
++      Map.dropUnusedParameters();
+ 
+       AI->AccessMultiDimMap[PA] = Map;
+ 
+@@ -450,6 +451,7 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+         int numDims = M.getNumOutputDimensions();
+         M = M.divideRangeDims(ByteGCD, 0, numDims-1);
+         M = M.coalesce();
++        M.dropUnusedParameters();
+       }
+     }
+   }
+@@ -564,9 +566,9 @@ void PACCSummary::ArrayInfo::print(raw_ostream &OS) const {
+     OS << "\t\tMayRead (Bytes): " << AccessMapsBytes[AMK_MAYREAD] << "\n";
+   if (AccessMapsBytes[AMK_MUSTREAD])
+     OS << "\t\tMustRead (Bytes): " << AccessMapsBytes[AMK_MUSTREAD] << "\n";
+-  if (AccessMapsBytes[AMK_MAYREAD])
++  if (AccessMapsBytes[AMK_MAYWRITE])
+     OS << "\t\tMayWrite (Bytes): " << AccessMapsBytes[AMK_MAYWRITE] << "\n";
+-  if (AccessMapsBytes[AMK_MAYREAD])
++  if (AccessMapsBytes[AMK_MUSTWRITE])
+     OS << "\t\tMustWrite (Bytes): " << AccessMapsBytes[AMK_MUSTWRITE] << "\n";
+ }
+ 
+-- 
+1.8.3.1
+

@@ -1,0 +1,694 @@
+From cde381d43641a2cbcd9239c7b5e279cd6241de79 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Sat, 17 Mar 2018 14:26:37 +0100
+Subject: [PATCH 10/29] WIP
+
+---
+ .../llvm/Analysis/PolyhedralExpressionBuilder.h    | 122 ++++++++++++++++
+ include/llvm/Analysis/PolyhedralValueInfo.h        | 161 ++++-----------------
+ lib/Analysis/PolyhedralAccessInfo.cpp              |  12 +-
+ lib/Analysis/PolyhedralExpressionBuilder.cpp       |  46 ++++++
+ lib/Analysis/PolyhedralValueInfo.cpp               |  55 +------
+ unittests/Analysis/CMakeLists.txt                  |   1 +
+ unittests/Analysis/PolyhedralValueInfoTest.cpp     | 126 ++++++++++++++++
+ 7 files changed, 338 insertions(+), 185 deletions(-)
+ create mode 100644 unittests/Analysis/PolyhedralValueInfoTest.cpp
+
+diff --git a/include/llvm/Analysis/PolyhedralExpressionBuilder.h b/include/llvm/Analysis/PolyhedralExpressionBuilder.h
+index c45481d..ed80a4d 100644
+--- a/include/llvm/Analysis/PolyhedralExpressionBuilder.h
++++ b/include/llvm/Analysis/PolyhedralExpressionBuilder.h
+@@ -17,6 +17,128 @@
+ 
+ namespace llvm {
+ 
++/// A cache that maps values/basic blocks and scopes to the computed polyhedral
++/// representation (PEXP). The results for maximal scopes (nullptr) can be used
++/// in an inter-procedural setting.
++class PolyhedralValueInfoCache final {
++
++  /// Mapping from scoped basic blocks to their domain expressed as a PEXP.
++  using DomainMapKey = std::pair<BasicBlock *, Loop *>;
++  DenseMap<DomainMapKey, PEXP *> DomainMap;
++
++  /// Mapping from scoped values to their polyhedral representation.
++  using ValueMapKey = std::pair<Value *, Loop *>;
++  DenseMap<ValueMapKey, PEXP *> ValueMap;
++
++  /// Mapping from scoped loops to their backedge taken count.
++  using LoopMapKey = std::pair<const Loop *, Loop *>;
++  DenseMap<LoopMapKey, PEXP *> LoopMap;
++
++  /// Mapping from parameter values to their unique id.
++  DenseMap<Value *, PVId> ParameterMap;
++
++  /// Return or create and cache a PEXP for @p BB in @p Scope.
++  PEXP *getOrCreateDomain(BasicBlock &BB, Loop *Scope) {
++    auto *&PE = DomainMap[{&BB, Scope}];
++    if (!PE)
++      PE = new PEXP(&BB, Scope);
++
++    // Verify the internal state
++    assert(PE == lookup(BB, Scope));
++    return PE;
++  }
++
++  /// Return or create and cache a PEXP for @p V in @p Scope.
++  PEXP *getOrCreatePEXP(Value &V, Loop *Scope) {
++    auto *&PE = ValueMap[{&V, Scope}];
++    if (!PE)
++      PE = new PEXP(&V, Scope);
++
++    // Verify the internal state
++    assert(PE == lookup(V, Scope));
++    return PE;
++  }
++
++  /// Create or return a PEXP for the backedge taken count of @p L in @p Scope.
++  PEXP *getOrCreateBackedgeTakenCount(const Loop &L, Loop *Scope) {
++    auto *&PE = LoopMap[{&L, Scope}];
++    if (!PE)
++      PE = new PEXP(L.getHeader(), Scope);
++
++    // Verify the internal state
++    assert(PE == lookup(L, Scope));
++    return PE;
++  }
++
++  std::string getParameterNameForValue(Value &V);
++
++  /// Return the unique parameter id for @p V.
++  PVId getParameterId(Value &V, const PVCtx &Ctx);
++
++  friend class PolyhedralExpressionBuilder;
++
++public:
++  ~PolyhedralValueInfoCache();
++
++  /// Return the cached polyhedral representation of @p V in @p Scope, if any.
++  PEXP *lookup(Value &V, Loop *Scope) { return ValueMap.lookup({&V, Scope}); }
++
++  /// Return the cached polyhedral representation of @p BB in @p Scope, if any.
++  PEXP *lookup(BasicBlock &BB, Loop *Scope) {
++    return DomainMap.lookup({&BB, Scope});
++  }
++
++  /// Return the cached backedge taken count of @p L in @p Scope, if any.
++  PEXP *lookup(const Loop &L, Loop *Scope) {
++    return LoopMap.lookup({&L, Scope});
++  }
++
++  /// Forget the value for @p BB in @p Scope. Returns true if there was one.
++  bool forget(BasicBlock &BB, Loop *Scope) {
++    return DomainMap.erase({&BB, Scope});
++  }
++
++  /// Forget the value for @p V in @p Scope. Returns true if there was one.
++  bool forget(Value &V, Loop *Scope) {
++    return ValueMap.erase({&V, Scope});
++  }
++
++  /// Iterators for polyhedral representation of values.
++  ///{
++  using iterator = decltype(ValueMap)::iterator;
++  using const_iterator = decltype(ValueMap)::const_iterator;
++
++  iterator begin() { return ValueMap.begin(); }
++  iterator end() { return ValueMap.end(); }
++  const_iterator begin() const { return ValueMap.begin(); }
++  const_iterator end() const { return ValueMap.end(); }
++
++  iterator_range<iterator> values() { return make_range(begin(), end()); }
++  iterator_range<const_iterator> values() const {
++    return make_range(begin(), end());
++  }
++  ///}
++
++  /// Iterators for polyhedral domains of basic block.
++  ///{
++  using domain_iterator = decltype(DomainMap)::iterator;
++  using const_domain_iterator = decltype(DomainMap)::const_iterator;
++
++  domain_iterator domain_begin() { return DomainMap.begin(); }
++  domain_iterator domain_end() { return DomainMap.end(); }
++  const_domain_iterator domain_begin() const { return DomainMap.begin(); }
++  const_domain_iterator domain_end() const { return DomainMap.end(); }
++
++  iterator_range<domain_iterator> domains() {
++    return make_range(domain_begin(), domain_end());
++  }
++  iterator_range<const_domain_iterator> domains() const {
++    return make_range(domain_begin(), domain_end());
++  }
++  ///}
++};
++
++
+ class PolyhedralExpressionBuilder
+     : public InstVisitor<PolyhedralExpressionBuilder, PEXP *> {
+ 
+diff --git a/include/llvm/Analysis/PolyhedralValueInfo.h b/include/llvm/Analysis/PolyhedralValueInfo.h
+index eff51b6..30a94c4 100644
+--- a/include/llvm/Analysis/PolyhedralValueInfo.h
++++ b/include/llvm/Analysis/PolyhedralValueInfo.h
+@@ -8,8 +8,11 @@
+ //===----------------------------------------------------------------------===//
+ //
+ // Analysis to create polyhedral abstractions for values, instructions and
+-// iteration domains. These abstractions are parametric, piece-wise affine
+-// functions with loop-iteration granularity.
++// iteration domains. These abstractions are symbolic, piece-wise affine
++// functions with loop-iteration granularity. See the PEXP class comment for
++// more information and examples.
++//
++//
+ //
+ // Parts of the code and ideas have been ported from the Polly [0] project.
+ //
+@@ -31,9 +34,12 @@ class Region;
+ class PolyhedralValueInfo;
+ class PolyhedralExpressionBuilder;
+ 
+-/// Polyhedral representation of a value (or basic block) in a scope. The values
+-/// are expressed with regards to loop iterations. The scope defines which loop
+-/// iterations are represented explicitly and which are kept parametric.
++/// Polyhedral representation of a value (incl. basic block) defined in a scope
++/// and evaluated at a certain program point. The values are expressed with
++/// regards to loop iterations and symbolic in any expression outside the scope
++/// as well as non-affine or dynamic expression inside of it. Thus, the scope
++/// defines which loop iterations are represented explicitly and which are
++/// treated as unknown but fixed.
+ ///
+ /// For the value of j in following two dimensional loop nest there are three
+ /// different PEXP values depending on the scope.
+@@ -48,14 +54,15 @@ class PolyhedralExpressionBuilder;
+ ///          |                                  | in one iteration of the j-loop
+ /// i-loop   | [i] -> { [l1]    -> [(i + l1)] } | Parametric value of i plus the
+ ///          |                                  | current loop iteration (j) of
+-///          |                                  | the innermost loop
++///          |                                  | the innermost loop (here l1)
+ /// max/none | [] -> { [l0, l1] -> [(l0 + l1)]} | Sum of the current iterations
+ ///          |                                  | in the i-loop and j-loop
+ ///            /\       /\           /\
+ ///            ||       ||           ||
+-///       parameters    ||          value
++///      parameters     ||          value
+ ///                 loop iterations
+ ///
++///
+ /// The domain of S in the above example also depends on the scope and can be
+ /// one of the following:
+ ///
+@@ -78,12 +85,14 @@ class PolyhedralExpressionBuilder;
+ ///            /\       /\           /\         /\
+ ///            ||       ||           ||         ||
+ ///       parameters    ||   (fixed) value (1)  ||
+-///                 loop iterations          constraints
++///                 loop iterations   /\     constraints
++///                                   ||
++///                        implementation artifact
+ ///
+-/// Note that iterations are always "normalized", thus they are expressed as a
+-/// range from 0 to the number of iterations. The value part of the polyhedral
+-/// representation will compensate for non-zero initial values or strides not
+-/// equal to one.
++/// Note that loop iterations are always "normalized", thus they are expressed
++/// as a range from 0 to the maximal number of iterations with a step of one.
++/// The value part of the polyhedral representation will compensate for non-zero
++/// initial values or non-unit strides.
+ ///
+ /// If a scope loop is given, the PEXP will not contain information about any
+ /// expressions outside that loop. Otherwise, the PEXP will represent all
+@@ -91,6 +100,8 @@ class PolyhedralExpressionBuilder;
+ /// would become non-affine. Instead of a non-affine (thus invalid) result the
+ /// non-affine part is represented as a parameter.
+ ///
++/// The user loop ... TODO
++///
+ /// TODO: Describe invalid and known domain.
+ ///
+ class PEXP {
+@@ -106,7 +117,8 @@ public:
+   };
+ 
+   /// Create a new, uninitialized polyhedral expression for @p Val.
+-  PEXP(Value *Val, Loop *Scope) : Kind(EK_NONE), Val(Val), Scope(Scope) {}
++  PEXP(Value *Val, Loop *Scope)
++      : Kind(EK_NONE), Val(Val), Scope(Scope), UseScope(nullptr) {}
+ 
+   /// Return the value this PEXP represents.
+   Value *getValue() const { return Val; }
+@@ -153,6 +165,9 @@ private:
+   /// The scope of this polyhedral expression.
+   Loop *const Scope;
+ 
++  /// The use program point expressed in terms of a loop.
++  Loop *const UseScope;
++
+   /// The value represented as (p)iece-(w)ise (a)ffine function.
+   PVAff PWA;
+ 
+@@ -186,126 +201,6 @@ private:
+   friend class PolyhedralExpressionBuilder;
+ };
+ 
+-/// A cache that maps values/basic blocks and scopes to the computed polyhedral
+-/// representation (PEXP). The results for maximal scopes (nullptr) can be used
+-/// in an inter-procedural setting.
+-class PolyhedralValueInfoCache final {
+-
+-  /// Mapping from scoped basic blocks to their domain expressed as a PEXP.
+-  using DomainMapKey = std::pair<BasicBlock *, Loop *>;
+-  DenseMap<DomainMapKey, PEXP *> DomainMap;
+-
+-  /// Mapping from scoped values to their polyhedral representation.
+-  using ValueMapKey = std::pair<Value *, Loop *>;
+-  DenseMap<ValueMapKey, PEXP *> ValueMap;
+-
+-  /// Mapping from scoped loops to their backedge taken count.
+-  using LoopMapKey = std::pair<const Loop *, Loop *>;
+-  DenseMap<LoopMapKey, PEXP *> LoopMap;
+-
+-  /// Mapping from parameter values to their unique id.
+-  DenseMap<Value *, PVId> ParameterMap;
+-
+-  /// Return or create and cache a PEXP for @p BB in @p Scope.
+-  PEXP *getOrCreateDomain(BasicBlock &BB, Loop *Scope) {
+-    auto *&PE = DomainMap[{&BB, Scope}];
+-    if (!PE)
+-      PE = new PEXP(&BB, Scope);
+-
+-    // Verify the internal state
+-    assert(PE == lookup(BB, Scope));
+-    return PE;
+-  }
+-
+-  /// Return or create and cache a PEXP for @p V in @p Scope.
+-  PEXP *getOrCreatePEXP(Value &V, Loop *Scope) {
+-    auto *&PE = ValueMap[{&V, Scope}];
+-    if (!PE)
+-      PE = new PEXP(&V, Scope);
+-
+-    // Verify the internal state
+-    assert(PE == lookup(V, Scope));
+-    return PE;
+-  }
+-
+-  /// Create or return a PEXP for the backedge taken count of @p L in @p Scope.
+-  PEXP *getOrCreateBackedgeTakenCount(const Loop &L, Loop *Scope) {
+-    auto *&PE = LoopMap[{&L, Scope}];
+-    if (!PE)
+-      PE = new PEXP(L.getHeader(), Scope);
+-
+-    // Verify the internal state
+-    assert(PE == lookup(L, Scope));
+-    return PE;
+-  }
+-
+-  std::string getParameterNameForValue(Value &V);
+-
+-  /// Return the unique parameter id for @p V.
+-  PVId getParameterId(Value &V, const PVCtx &Ctx);
+-
+-  friend class PolyhedralExpressionBuilder;
+-
+-public:
+-  ~PolyhedralValueInfoCache();
+-
+-  /// Return the cached polyhedral representation of @p V in @p Scope, if any.
+-  PEXP *lookup(Value &V, Loop *Scope) { return ValueMap.lookup({&V, Scope}); }
+-
+-  /// Return the cached polyhedral representation of @p BB in @p Scope, if any.
+-  PEXP *lookup(BasicBlock &BB, Loop *Scope) {
+-    return DomainMap.lookup({&BB, Scope});
+-  }
+-
+-  /// Return the cached backedge taken count of @p L in @p Scope, if any.
+-  PEXP *lookup(const Loop &L, Loop *Scope) {
+-    return LoopMap.lookup({&L, Scope});
+-  }
+-
+-  /// Forget the value for @p BB in @p Scope. Returns true if there was one.
+-  bool forget(BasicBlock &BB, Loop *Scope) {
+-    return DomainMap.erase({&BB, Scope});
+-  }
+-
+-  /// Forget the value for @p V in @p Scope. Returns true if there was one.
+-  bool forget(Value &V, Loop *Scope) {
+-    return ValueMap.erase({&V, Scope});
+-  }
+-
+-  /// Iterators for polyhedral representation of values.
+-  ///{
+-  using iterator = decltype(ValueMap)::iterator;
+-  using const_iterator = decltype(ValueMap)::const_iterator;
+-
+-  iterator begin() { return ValueMap.begin(); }
+-  iterator end() { return ValueMap.end(); }
+-  const_iterator begin() const { return ValueMap.begin(); }
+-  const_iterator end() const { return ValueMap.end(); }
+-
+-  iterator_range<iterator> values() { return make_range(begin(), end()); }
+-  iterator_range<const_iterator> values() const {
+-    return make_range(begin(), end());
+-  }
+-  ///}
+-
+-  /// Iterators for polyhedral domains of basic block.
+-  ///{
+-  using domain_iterator = decltype(DomainMap)::iterator;
+-  using const_domain_iterator = decltype(DomainMap)::const_iterator;
+-
+-  domain_iterator domain_begin() { return DomainMap.begin(); }
+-  domain_iterator domain_end() { return DomainMap.end(); }
+-  const_domain_iterator domain_begin() const { return DomainMap.begin(); }
+-  const_domain_iterator domain_end() const { return DomainMap.end(); }
+-
+-  iterator_range<domain_iterator> domains() {
+-    return make_range(domain_begin(), domain_end());
+-  }
+-  iterator_range<const_domain_iterator> domains() const {
+-    return make_range(domain_begin(), domain_end());
+-  }
+-  ///}
+-};
+ 
+ /// Analysis to create polyhedral abstractions for values, instructions and
+ /// iteration domains.
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 94e35f3..9a6974d 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -301,6 +301,7 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+         unsigned Dim = It.second.first - 1;
+         DEBUG(dbgs() << "Dim: " << Dim << "\nInst: " << *It.first << "\n");
+         auto &DimInfo = Dimensions[Dim];
++        errs() << *It.second.second << "\n";
+         //assert(DimInfo.first == nullptr && DimInfo.second == nullptr);
+         //DimInfo.first = It.first;
+         //DimInfo.second = It.second.second;
+@@ -311,6 +312,8 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+ 
+       DEBUG(dbgs() << "#DimPWAs: " << DimPWAs.size() << "\n");
+       int LastDim = Dimensions.size();
++      //errs() << PWA << "\n";
++      //errs() << "LD: " << LastDim << "\n";
+       assert(!DimPWAs[LastDim]);
+       DimPWAs[LastDim] = PWA;
+ 
+@@ -329,11 +332,16 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+           PVAff Coeff = LastPWA.getParameterCoeff(PId);
+           DEBUG(dbgs() << "Coeff " << Coeff << "\n");
+           assert(!Coeff || Coeff.isConstant());
+-          if (!Coeff)
++          if (!Coeff || Coeff.isEqual(PVAff(Coeff, 0)))
+             continue;
+ 
+           PVAff &DimPWA = DimPWAs[LastDim - Dim - 1];
+-          assert(!DimPWA);
++          //if (DimPWA && DimPWA.isConstant()) {
++            //errs() << "DPWA: " << DimPWA << "\n";
++            //errs() << "NPWA: " << It.second->getPWA() << "\n";
++            //continue;
++          //}
++          assert(!DimPWA || DimPWA.isEqual(It.second->getPWA()));
+ 
+           DEBUG(dbgs() << "Rem: " << It.second->getPWA() << "\n";);
+           DimPWA = It.second->getPWA();
+diff --git a/lib/Analysis/PolyhedralExpressionBuilder.cpp b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+index de7df87..bc1cdd7 100644
+--- a/lib/Analysis/PolyhedralExpressionBuilder.cpp
++++ b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+@@ -27,6 +27,52 @@ STATISTIC(NUM_DOMAINS, "Number of domains created");
+ STATISTIC(NUM_EXPRESSIONS, "Number of expressions created");
+ STATISTIC(COMPLEX_DOMAIN, "Number of domains to complex");
+ 
++// ------------------------------------------------------------------------- //
++
++PolyhedralValueInfoCache::~PolyhedralValueInfoCache() {
++  DeleteContainerSeconds(LoopMap);
++  DeleteContainerSeconds(ValueMap);
++  DeleteContainerSeconds(DomainMap);
++  ParameterMap.clear();
++}
++
++std::string PolyhedralValueInfoCache::getParameterNameForValue(Value &V) {
++  if (IntrinsicInst *Intr = dyn_cast<IntrinsicInst>(&V)) {
++    switch (Intr->getIntrinsicID()) {
++    case Intrinsic::nvvm_read_ptx_sreg_tid_x:
++      return "nvvm_tid_x";
++    case Intrinsic::nvvm_read_ptx_sreg_tid_y:
++      return "nvvm_tid_y";
++    case Intrinsic::nvvm_read_ptx_sreg_tid_z:
++      return "nvvm_tid_z";
++    case Intrinsic::nvvm_read_ptx_sreg_tid_w:
++      return "nvvm_tid_w";
++    default:
++      break;
++    }
++  }
++
++  if (V.hasName())
++    return V.getName().str();
++  return "p" + std::to_string(ParameterMap.size());
++}
++
++PVId PolyhedralValueInfoCache::getParameterId(Value &V, const PVCtx &Ctx) {
++  PVId &Id = ParameterMap[&V];
++  if (Id)
++    return Id;
++
++  std::string ParameterName = getParameterNameForValue(V);
++  ParameterName = PVBase::getIslCompatibleName("", ParameterName, "");
++  DEBUG(dbgs() << "NEW PARAM: " << V << " ::: " << ParameterName << "\n";);
++  Id = PVId(Ctx, ParameterName, &V);
++
++  return Id;
++}
++
++// ------------------------------------------------------------------------- //
++
++
+ bool PolyhedralExpressionBuilder::combine(PEXP *PE, const PEXP *Other) {
+   PE->Kind = std::max(PE->Kind, Other->Kind);
+   if (PE->Kind == PEXP::EK_NON_AFFINE) {
+diff --git a/lib/Analysis/PolyhedralValueInfo.cpp b/lib/Analysis/PolyhedralValueInfo.cpp
+index daa9ce2..e1bf535 100644
+--- a/lib/Analysis/PolyhedralValueInfo.cpp
++++ b/lib/Analysis/PolyhedralValueInfo.cpp
+@@ -144,11 +144,11 @@ void PEXP::addInvalidDomain(const PVSet &ID) {
+   // Sanity check
+   assert(!KnownDomain || !PWA ||
+          KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
+-  assert(!InvalidDomain || !PWA ||
+-         InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
+-  assert(!KnownDomain || !InvalidDomain ||
+-         KnownDomain.getNumInputDimensions() ==
+-             InvalidDomain.getNumInputDimensions());
++  //assert(!InvalidDomain || !PWA ||
++         //InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
++  //assert(!KnownDomain || !InvalidDomain ||
++         //KnownDomain.getNumInputDimensions() ==
++             //InvalidDomain.getNumInputDimensions());
+ }
+ 
+ void PEXP::addKnownDomain(const PVSet &KD) {
+@@ -211,51 +211,6 @@ void PEXP::adjustInvalidAndKnownDomain() {
+ 
+ // ------------------------------------------------------------------------- //
+ 
+-PolyhedralValueInfoCache::~PolyhedralValueInfoCache() {
+-  DeleteContainerSeconds(LoopMap);
+-  DeleteContainerSeconds(ValueMap);
+-  DeleteContainerSeconds(DomainMap);
+-  ParameterMap.clear();
+-}
+-
+-std::string PolyhedralValueInfoCache::getParameterNameForValue(Value &V) {
+-  if (IntrinsicInst *Intr = dyn_cast<IntrinsicInst>(&V)) {
+-    switch (Intr->getIntrinsicID()) {
+-    case Intrinsic::nvvm_read_ptx_sreg_tid_x:
+-      return "nvvm_tid_x";
+-    case Intrinsic::nvvm_read_ptx_sreg_tid_y:
+-      return "nvvm_tid_y";
+-    case Intrinsic::nvvm_read_ptx_sreg_tid_z:
+-      return "nvvm_tid_z";
+-    case Intrinsic::nvvm_read_ptx_sreg_tid_w:
+-      return "nvvm_tid_w";
+-    default:
+-      break;
+-    }
+-  }
+-
+-  if (V.hasName())
+-    return V.getName().str();
+-  return "p" + std::to_string(ParameterMap.size());
+-}
+-
+-PVId PolyhedralValueInfoCache::getParameterId(Value &V, const PVCtx &Ctx) {
+-  PVId &Id = ParameterMap[&V];
+-  if (Id)
+-    return Id;
+-
+-  std::string ParameterName = getParameterNameForValue(V);
+-  ParameterName = PVBase::getIslCompatibleName("", ParameterName, "");
+-  DEBUG(dbgs() << "NEW PARAM: " << V << " ::: " << ParameterName << "\n";);
+-  Id = PVId(Ctx, ParameterName, &V);
+-
+-  return Id;
+-}
+-
+-// ------------------------------------------------------------------------- //
+-
+-// ------------------------------------------------------------------------- //
+-
+ PolyhedralValueInfo::PolyhedralValueInfo(PVCtx Ctx, LoopInfo &LI)
+     : Ctx(Ctx), LI(LI), PEBuilder(new PolyhedralExpressionBuilder(*this)) {
+ }
+diff --git a/unittests/Analysis/CMakeLists.txt b/unittests/Analysis/CMakeLists.txt
+index 65f2aed..cb2e062 100644
+--- a/unittests/Analysis/CMakeLists.txt
++++ b/unittests/Analysis/CMakeLists.txt
+@@ -21,6 +21,7 @@ add_llvm_unittest(AnalysisTests
+   MemorySSA.cpp
+   OrderedBasicBlockTest.cpp
+   ProfileSummaryInfoTest.cpp
++  PolyhedralValueInfoTest.cpp
+   ScalarEvolutionTest.cpp
+   SparsePropagation.cpp
+   TargetLibraryInfoTest.cpp
+diff --git a/unittests/Analysis/PolyhedralValueInfoTest.cpp b/unittests/Analysis/PolyhedralValueInfoTest.cpp
+new file mode 100644
+index 0000000..79a332b
+--- /dev/null
++++ b/unittests/Analysis/PolyhedralValueInfoTest.cpp
+@@ -0,0 +1,126 @@
++//===- PolyhedrealValueInfoTest.cpp - PolyhedralValueInfo unit tests ------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/ADT/SmallVector.h"
++#include "llvm/Analysis/LoopInfo.h"
++#include "llvm/Analysis/TargetLibraryInfo.h"
++#include "llvm/Analysis/PolyhedralValueInfo.h"
++#include "llvm/AsmParser/Parser.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/IR/Dominators.h"
++#include "llvm/IR/GlobalVariable.h"
++#include "llvm/IR/IRBuilder.h"
++#include "llvm/IR/InstIterator.h"
++#include "llvm/IR/LLVMContext.h"
++#include "llvm/IR/LegacyPassManager.h"
++#include "llvm/IR/Module.h"
++#include "llvm/IR/Verifier.h"
++#include "llvm/Support/SourceMgr.h"
++#include "gtest/gtest.h"
++
++namespace llvm {
++namespace {
++
++// We use this fixture to ensure that we clean up PolyhedralValueInfo before
++// deleting the PassManager.
++class PolyhedrealValueInfoTest : public testing::Test {
++protected:
++  LLVMContext Context;
++  PVCtx Ctx;
++  Module M;
++
++  std::unique_ptr<LoopInfo> LI;
++  std::unique_ptr<DominatorTree> DT;
++
++  PolyhedrealValueInfoTest() : M("", Context) {}
++
++  PolyhedralValueInfo buildSE(Function &F) {
++    DT.reset(new DominatorTree(F));
++    LI.reset(new LoopInfo(*DT));
++    return PolyhedralValueInfo(Ctx, *LI.get());
++  }
++};
++
++TEST_F(PolyhedrealValueInfoTest, PEXPConstants) {
++
++  FunctionType *FTy = FunctionType::get(Type::getVoidTy(Context),
++                                              std::vector<Type *>(), false);
++  Function *F = cast<Function>(M.getOrInsertFunction("f", FTy));
++  BasicBlock *BB = BasicBlock::Create(Context, "entry", F);
++  ReturnInst::Create(Context, nullptr, BB);
++
++  PolyhedralValueInfo SE = buildSE(*F);
++
++  IntegerType *Int32Ty = IntegerType::get(Context, 32);
++  const PEXP *OneI32a = SE.getPEXP(ConstantInt::get(Int32Ty, 1));
++  const PEXP *OneI32b = SE.getPEXP(ConstantInt::get(Int32Ty, 1));
++  const PEXP *MinusOneI32 = SE.getPEXP(ConstantInt::get(Int32Ty, -1));
++
++  EXPECT_EQ(OneI32a, OneI32b);
++  EXPECT_EQ(OneI32a, MinusOneI32);
++
++}
++
++TEST_F(PolyhedrealValueInfoTest, PEXPUnknownRAUW) {
++  FunctionType *FTy = FunctionType::get(Type::getVoidTy(Context),
++                                              std::vector<Type *>(), false);
++  Function *F = cast<Function>(M.getOrInsertFunction("f", FTy));
++  BasicBlock *BB = BasicBlock::Create(Context, "entry", F);
++  ReturnInst::Create(Context, nullptr, BB);
++
++  Type *Ty = Type::getInt1Ty(Context);
++  Constant *Init = Constant::getNullValue(Ty);
++  Value *V0 = new GlobalVariable(M, Ty, false, GlobalValue::ExternalLinkage, Init, "V0");
++  Value *V1 = new GlobalVariable(M, Ty, false, GlobalValue::ExternalLinkage, Init, "V1");
++  Value *V2 = new GlobalVariable(M, Ty, false, GlobalValue::ExternalLinkage, Init, "V2");
++
++  PolyhedralValueInfo SE = buildSE(*F);
++
++  const PEXP *S0 = SE.getPEXP(V0);
++  const PEXP *S1 = SE.getPEXP(V1);
++  const PEXP *S2 = SE.getPEXP(V2);
++
++  EXPECT_EQ(S0, S1);
++  EXPECT_EQ(S0, S2);
++  EXPECT_EQ(S1, S2);
++
++#if 0
++  const PEXP *P0 = SE.getAddExpr(S0, S0);
++  const PEXP *P1 = SE.getAddExpr(S1, S1);
++  const PEXP *P2 = SE.getAddExpr(S2, S2);
++
++  const PEXPMulExpr *M0 = cast<PEXPMulExpr>(P0);
++  const PEXPMulExpr *M1 = cast<PEXPMulExpr>(P1);
++  const PEXPMulExpr *M2 = cast<PEXPMulExpr>(P2);
++
++  EXPECT_EQ(cast<PEXPConstant>(M0->getOperand(0))->getValue()->getZExtValue(),
++            2u);
++  EXPECT_EQ(cast<PEXPConstant>(M1->getOperand(0))->getValue()->getZExtValue(),
++            2u);
++  EXPECT_EQ(cast<PEXPConstant>(M2->getOperand(0))->getValue()->getZExtValue(),
++            2u);
++
++  // Before the RAUWs, these are all pointing to separate values.
++  EXPECT_EQ(cast<PEXPUnknown>(M0->getOperand(1))->getValue(), V0);
++  EXPECT_EQ(cast<PEXPUnknown>(M1->getOperand(1))->getValue(), V1);
++  EXPECT_EQ(cast<PEXPUnknown>(M2->getOperand(1))->getValue(), V2);
++
++  // Do some RAUWs.
++  V2->replaceAllUsesWith(V1);
++  V1->replaceAllUsesWith(V0);
++
++  // After the RAUWs, these should all be pointing to V0.
++  EXPECT_EQ(cast<PEXPUnknown>(M0->getOperand(1))->getValue(), V0);
++  EXPECT_EQ(cast<PEXPUnknown>(M1->getOperand(1))->getValue(), V0);
++  EXPECT_EQ(cast<PEXPUnknown>(M2->getOperand(1))->getValue(), V0);
++#endif
++}
++
++}  // end anonymous namespace
++}  // end namespace llvm
+-- 
+1.8.3.1
+

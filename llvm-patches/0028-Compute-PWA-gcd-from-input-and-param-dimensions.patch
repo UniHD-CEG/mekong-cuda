@@ -1,0 +1,54 @@
+From dbe9aaf5dec723ef3ded34aa1a8a6a74a90f7e35 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Thu, 13 Sep 2018 14:06:45 +0200
+Subject: [PATCH 28/29] Compute PWA gcd from input and param dimensions
+
+---
+ lib/Analysis/PValue.cpp               | 10 +++++++++-
+ lib/Analysis/PolyhedralAccessInfo.cpp |  2 +-
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/lib/Analysis/PValue.cpp b/lib/Analysis/PValue.cpp
+index 5ecb03d..b9a50ba 100644
+--- a/lib/Analysis/PValue.cpp
++++ b/lib/Analysis/PValue.cpp
+@@ -1049,7 +1049,6 @@ isl_stat islFindCoeffGCD(isl_set *set, isl_aff *aff, void *user) {
+   isl_set_free(set);
+ 
+   int nDim = isl_aff_dim(aff, isl_dim_in);
+-
+   for (int dim = 0; dim < nDim; ++dim) {
+     isl_val *val = isl_aff_get_coefficient_val(aff, isl_dim_in, dim);
+     if (info->gcd == nullptr) {
+@@ -1058,6 +1057,15 @@ isl_stat islFindCoeffGCD(isl_set *set, isl_aff *aff, void *user) {
+       info->gcd = isl_val_gcd(info->gcd, val);
+     }
+   }
++  nDim = isl_aff_dim(aff, isl_dim_param);
++  for (int dim = 0; dim < nDim; ++dim) {
++    isl_val *val = isl_aff_get_coefficient_val(aff, isl_dim_param, dim);
++    if (info->gcd == nullptr) {
++      info->gcd = val;
++    } else {
++      info->gcd = isl_val_gcd(info->gcd, val);
++    }
++  }
+   isl_aff_free(aff);
+   return isl_stat_ok;
+ }
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 8dbb25e..edfb9dc 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -437,7 +437,7 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+       auto CoeffGCD = PWA.findCoeffGCD();
+       if (CoeffGCD.isInteger()) {
+         int64_t CoeffGCDi64 = CoeffGCD.getIntegerVal();
+-          ByteGCD = GreatestCommonDivisor64(ByteGCD, CoeffGCDi64);
++        ByteGCD = GreatestCommonDivisor64(ByteGCD, CoeffGCDi64);
+       }
+ 
+       // Smudge maps to width of element size of this particular instruction.
+-- 
+1.8.3.1
+

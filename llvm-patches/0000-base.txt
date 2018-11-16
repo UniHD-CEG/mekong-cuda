@@ -1,0 +1,15 @@
+patches apply to:
+
+commit cd2a37bac37847ffba082865447ed35162d87b85
+Author: Martin Storsjo <martin@martin.st>
+Date:   Tue Jan 9 07:09:28 2018 +0000
+                                                  
+    [docs] Mention SjLj fixes in the release notes
+                                 
+    Enabling SjLj on x86 on platforms where it isn't used by default
+    was partially implemented before 6.0, but didn't actually fully
+    work until now. 
+                     
+    Differential Revision: https://reviews.llvm.org/D41712
+                                    
+    git-svn-id: https://llvm.org/svn/llvm-project/llvm/branches/release_60@322059 91177308-0d34-0410-b5e6-96231b3b80d8

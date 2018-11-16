@@ -1,0 +1,208 @@
+From 8e6aefddd68ba129d4dd7c2203e7cf797d98e2a3 Mon Sep 17 00:00:00 2001
+From: Alexander Matz <a.matz.1988@gmail.com>
+Date: Mon, 6 Aug 2018 11:48:24 +0200
+Subject: [PATCH 16/29] quieter analysis
+
+---
+ lib/Analysis/PolyhedralAccessInfo.cpp        | 10 +++++-----
+ lib/Analysis/PolyhedralDependenceInfo.cpp    |  8 ++++----
+ lib/Analysis/PolyhedralExpressionBuilder.cpp | 20 ++++++++++----------
+ lib/Analysis/PolyhedralValueInfo.cpp         | 10 +++++-----
+ 4 files changed, 24 insertions(+), 24 deletions(-)
+
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 66d6dcb..e5ada17 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -303,7 +303,7 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+         unsigned Dim = It.second.first - 1;
+         DEBUG(dbgs() << "Dim: " << Dim << "\nInst: " << *It.first << "\n");
+         auto &DimInfo = Dimensions[Dim];
+-        errs() << *It.second.second << "\n";
++        DEBUG(dbgs() << *It.second.second << "\n");
+         //assert(DimInfo.first == nullptr && DimInfo.second == nullptr);
+         //DimInfo.first = It.first;
+         //DimInfo.second = It.second.second;
+@@ -748,7 +748,7 @@ struct Expr {
+   void dump() const { print(dbgs()); }
+ 
+   bool matches(Value *V) {
+-    errs() << "Match V: " << *V << "\n";
++    DEBUG(dbgs() << "Match V: " << *V << "\n");
+     if (Val && V == Val) {
+       assert(Kind == EK_VALUE || Kind == EK_INSTRUCTION || Kind == EK_ARGUMENT);
+       PossibleMatches.insert(Val);
+@@ -785,7 +785,7 @@ struct Expr {
+   }
+ 
+   bool matches(Instruction *I) {
+-    errs() << "Match I: " << *I << "\n";
++    DEBUG(dbgs() << "Match I: " << *I << "\n");
+     if (Kind == EK_CONSTANT || Kind == EK_ARGUMENT)
+       return false;
+     if (Val && I == Val) {
+@@ -1118,9 +1118,9 @@ bool PolyhedralAccessInfoWrapperPass::runOnFunction(Function &F) {
+       getAnalysis<PolyhedralValueInfoWrapperPass>().getPolyhedralValueInfo(),
+       getAnalysis<LoopInfoWrapperPass>().getLoopInfo());
+ 
+-  PAI->detectKnownComputations(F);
++  //PAI->detectKnownComputations(F);
+ 
+-  PAI->extractComputations(F);
++  //PAI->extractComputations(F);
+ 
+   return false;
+ }
+diff --git a/lib/Analysis/PolyhedralDependenceInfo.cpp b/lib/Analysis/PolyhedralDependenceInfo.cpp
+index fb4087f..9002291 100644
+--- a/lib/Analysis/PolyhedralDependenceInfo.cpp
++++ b/lib/Analysis/PolyhedralDependenceInfo.cpp
+@@ -59,7 +59,7 @@ PolyhedralDependenceInfo::PolyhedralDependenceInfo(PolyhedralAccessInfo &PAI, Lo
+ PolyhedralDependenceInfo::~PolyhedralDependenceInfo() { releaseMemory(); }
+ 
+ bool PolyhedralDependenceInfo::isVectorizableLoop(Loop &L) {
+-  errs() << "CHECK L:";
++  DEBUG(dbgs() << "CHECK L:");
+   L.dump();
+ 
+   if (L.begin() != L.end()) {
+@@ -97,14 +97,14 @@ bool PolyhedralDependenceInfo::isVectorizableLoop(Loop &L) {
+ 
+     PVSet ConflictSet = ReadWriteMap.getParameterSet();
+     ConflictSet.dropUnusedParameters();
+-    errs() << ConflictSet <<"\n";
++    DEBUG(dbgs() << ConflictSet <<"\n");
+     DEBUG(dbgs() << "Conflicting accesses for " << *ArrayInfoMapIt.getFirst()
+                  << "\n\t => " << ReadWriteMap << "\n");
+     if (!ConflictSet.hasLowerBoundForParam(OffsetId))
+       return false;
+ 
+     ConflictSet.minForParam(OffsetId);
+-    errs() << ConflictSet <<"\n";
++    DEBUG(dbgs() << ConflictSet <<"\n");
+ 
+     return false;
+   }
+@@ -121,7 +121,7 @@ void PolyhedralDependenceInfo::print(raw_ostream &OS) const {
+   for (Loop *L : Loops) {
+     bool Vec =
+         const_cast<PolyhedralDependenceInfo *>(this)->isVectorizableLoop(*L);
+-    errs() << "L: " << L->getName() << " Vec: " << Vec << "\n";
++    DEBUG(dbgs() << "L: " << L->getName() << " Vec: " << Vec << "\n");
+   }
+ }
+ 
+diff --git a/lib/Analysis/PolyhedralExpressionBuilder.cpp b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+index 99066c3..e6e5dd5 100644
+--- a/lib/Analysis/PolyhedralExpressionBuilder.cpp
++++ b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+@@ -154,7 +154,7 @@ PEXP *PolyhedralExpressionBuilder::getBackedgeTakenCount(const Loop &L) {
+   BasicBlock *HeaderBB = L.getHeader();
+ 
+   const PEXP *HeaderBBPE = getDomain(*HeaderBB);
+-  DEBUG(errs() << "Header domain: " << HeaderBBPE << "\n");
++  DEBUG(dbgs() << "Header domain: " << HeaderBBPE << "\n");
+ 
+   // TODO: Allow (and skip) non-affine latch domains for under-approximations,
+   // thus a minimal trip count.
+@@ -182,7 +182,7 @@ PEXP *PolyhedralExpressionBuilder::getBackedgeTakenCount(const Loop &L) {
+     return PE->invalidate();
+   }
+ 
+-  //(errs() << "Header domain: " << HeaderBBPE << "\n");
++  DEBUG(dbgs() << "Header domain: " << HeaderBBPE << "\n");
+   combine(PE, HeaderBBPE);
+ 
+   if (HeaderBBDom.isEmpty())
+@@ -908,19 +908,19 @@ PEXP *PolyhedralExpressionBuilder::visitCastInst(CastInst &I) {
+ 
+ PEXP *PolyhedralExpressionBuilder::visitSelectInst(SelectInst &I) {
+   auto *CondPE = visitOperand(*I.getCondition(), I);
+-  DEBUG(errs() << "\nCondPE: " << CondPE << "\n");
++  DEBUG(dbgs() << "\nCondPE: " << CondPE << "\n");
+   if (PI.isNonAffine(CondPE))
+     return visitParameter(I);
+ 
+   auto *OpTrue = visitOperand(*I.getTrueValue(), I);
+   auto CondZero = CondPE->getPWA().zeroSet();
+-  DEBUG(errs() << "OpTrue: " << OpTrue << "\n");
+-  DEBUG(errs() << "CondZero: " << CondZero << "\n");
++  DEBUG(dbgs() << "OpTrue: " << OpTrue << "\n");
++  DEBUG(dbgs() << "CondZero: " << CondZero << "\n");
+ 
+   auto *OpFalse = visitOperand(*I.getFalseValue(), I);
+   auto CondNonZero = CondPE->getPWA().nonZeroSet();
+-  DEBUG(errs() << "OpFalse: " << OpFalse << "\n");
+-  DEBUG(errs() << "CondNonZero: " << CondNonZero << "\n");
++  DEBUG(dbgs() << "OpFalse: " << OpFalse << "\n");
++  DEBUG(dbgs() << "CondNonZero: " << CondNonZero << "\n");
+ 
+   auto *PE = getOrCreatePEXP(I);
+   if (!PI.isNonAffine(OpTrue))
+@@ -1075,9 +1075,9 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+   }
+ 
+   if (!PE || PE->isInitialized()) {
+-    errs() << "Ooo. " << PE << " : " << I << "\n";
++    DEBUG(dbgs() << "Ooo. " << PE << " : " << I << "\n");
+     if (PE)
+-      PE->dump();
++      DEBUG(PE->dump());
+   }
+   assert(PE && !PE->isInitialized());
+   PE->PWA = PVAff(Id);
+@@ -1153,7 +1153,7 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+       for (auto &PHIInfo : PHIInfos) {
+         if (PHIInfo.second.involvesInput(LoopDim - 1)) {
+           DEBUG(
+-              errs()
++              dbgs()
+               << "PHI is self reccurent but also involves recurrent other PHI: "
+               << PHIInfo.first << " => " << PHIInfo.second << "\n");
+           setScope(OldScope);
+diff --git a/lib/Analysis/PolyhedralValueInfo.cpp b/lib/Analysis/PolyhedralValueInfo.cpp
+index e1bf535..38d38a7 100644
+--- a/lib/Analysis/PolyhedralValueInfo.cpp
++++ b/lib/Analysis/PolyhedralValueInfo.cpp
+@@ -133,11 +133,11 @@ void PEXP::addInvalidDomain(const PVSet &ID) {
+                << "\n");
+   InvalidDomain.unify(ID);
+   if (InvalidDomain.isUniverse()) {
+-    DEBUG(errs() << " => invalid domain is the universe domain. Invalidate!\n");
++    DEBUG(dbgs() << " => invalid domain is the universe domain. Invalidate!\n");
+     invalidate();
+   }
+   if (InvalidDomain.isComplex()) {
+-    DEBUG(errs() << " => invalid domain is too complex. Invalidate!\n");
++    DEBUG(dbgs() << " => invalid domain is too complex. Invalidate!\n");
+     invalidate();
+   }
+ 
+@@ -156,7 +156,7 @@ void PEXP::addKnownDomain(const PVSet &KD) {
+                << "\n");
+   KnownDomain.intersect(KD);
+   if (KnownDomain.isComplex()) {
+-    DEBUG(errs() << " => known domain is too complex. Drop it!\n");
++    DEBUG(dbgs() << " => known domain is too complex. Drop it!\n");
+     KnownDomain = PVSet::universe(KnownDomain);
+   }
+   PWA.simplify(KnownDomain);
+@@ -499,13 +499,13 @@ bool PolyhedralValueInfo::isKnownToHold(Value *LHS, Value *RHS,
+ 
+ void PolyhedralValueInfo::print(raw_ostream &OS) const {
+   auto &PVIC = PEBuilder->getPolyhedralValueInfoCache();
+-  errs() << "\nDOMAINS:\n";
++  OS << "\nDOMAINS:\n";
+   for (auto &It : PVIC.domains()) {
+     Loop *L = It.first.second;
+     OS << "V: " << It.first.first->getName() << " in "
+        << (L ? L->getName() : "<max>") << ":\n\t" << It.second << "\n";
+   }
+-  errs() << "\nVALUES:\n";
++  OS << "\nVALUES:\n";
+   for (auto &It : PVIC) {
+     Loop *L = It.first.second;
+     OS << "V: " << *It.first.first << " in " << (L ? L->getName() : "<max>")
+-- 
+1.8.3.1
+

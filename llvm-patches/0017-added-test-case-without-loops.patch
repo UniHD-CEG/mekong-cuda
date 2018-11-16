@@ -1,0 +1,28 @@
+From c3049c068d0f9e60121b294224cebbe3134f7d3e Mon Sep 17 00:00:00 2001
+From: Alexander Matz <alexander.matz@ziti.uni-heidelberg.de>
+Date: Tue, 7 Aug 2018 13:01:21 +0200
+Subject: [PATCH 17/29] added test case without loops
+
+---
+ test/Analysis/PolyhedralInfo/noloops.ll | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+ create mode 100644 test/Analysis/PolyhedralInfo/noloops.ll
+
+diff --git a/test/Analysis/PolyhedralInfo/noloops.ll b/test/Analysis/PolyhedralInfo/noloops.ll
+new file mode 100644
+index 0000000..d0f9848
+--- /dev/null
++++ b/test/Analysis/PolyhedralInfo/noloops.ll
+@@ -0,0 +1,9 @@
++; RUN: opt -polyhedral-value-info -analyze < %s | FileCheck %s
++target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
++
++;    int *pass_through(int *A) {
++;      return A;
++;    }
++define i32* @pass_through(i32* readnone returned) local_unnamed_addr #0 {
++  ret i32* %0
++}
+-- 
+1.8.3.1
+

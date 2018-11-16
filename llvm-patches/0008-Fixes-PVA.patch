@@ -1,0 +1,200 @@
+From b468523f1f937fc61cbdce0875b05f050e52df3a Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Fri, 2 Mar 2018 12:28:52 +0100
+Subject: [PATCH 08/29] Fixes PVA
+
+---
+ include/llvm/Analysis/PValue.h               |  4 ++++
+ lib/Analysis/PValue.cpp                      | 15 +++++++++++---
+ lib/Analysis/PolyhedralExpressionBuilder.cpp | 12 +++++++----
+ lib/Analysis/PolyhedralValueInfo.cpp         | 31 +++++++++++++++++++++++++++-
+ 4 files changed, 54 insertions(+), 8 deletions(-)
+
+diff --git a/include/llvm/Analysis/PValue.h b/include/llvm/Analysis/PValue.h
+index a3d2d61..91013b8 100644
+--- a/include/llvm/Analysis/PValue.h
++++ b/include/llvm/Analysis/PValue.h
+@@ -169,6 +169,8 @@ public:
+ 
+   void dropUnusedParameters();
+ 
++  PVSet getParameterSet() const;
++
+   PVSet &simplify(const PVSet &S);
+   PVSet &simplifyParameters(const PVSet &S);
+ 
+@@ -402,6 +404,7 @@ public:
+   PVAff &multiply(const PVAff &PV);
+   PVAff &union_add(const PVAff &PV);
+   PVAff &union_min(const PVAff &PV);
++  PVAff &union_max(const PVAff &PV);
+ 
+   PVAff &select(const PVAff &PV0, const PVAff &PV1);
+ 
+@@ -433,6 +436,7 @@ public:
+   PVAff &intersectDomain(const PVSet &S);
+ 
+   PVAff &simplify(const PVSet &S);
++  PVAff &simplifyParameters(const PVSet &S);
+ 
+   PVSet getEqualDomain(const PVAff &Aff) const;
+   PVSet getLessThanDomain(const PVAff &Aff) const;
+diff --git a/lib/Analysis/PValue.cpp b/lib/Analysis/PValue.cpp
+index 74e02bc..d81c151 100644
+--- a/lib/Analysis/PValue.cpp
++++ b/lib/Analysis/PValue.cpp
+@@ -221,6 +221,10 @@ bool PVSet::isComplex() const {
+   return Complex;
+ }
+ 
++PVSet PVSet::getParameterSet() const {
++  return isl_set_params(isl_set_copy(Obj));
++}
++
+ int PVSet::getParameterPosition(const PVId &Id) const {
+   int Pos = isl_set_find_dim_by_id(Obj, isl_dim_param, Id);
+   return Pos;
+@@ -1165,9 +1169,8 @@ PVAff &PVAff::simplify(const PVSet &S) {
+   if (DimDiff > 0) {
+     unsigned Dim = S.getNumInputDimensions() - DimDiff;
+     Set = S;
+-    Set = isl_set_project_out(Set, isl_dim_set, Dim, getNumInputDimensions() - Dim);
+-  }
+-  else if (DimDiff < 0)
++    Set = isl_set_project_out(Set, isl_dim_set, Dim, DimDiff);
++  } else if (DimDiff < 0)
+     Set = isl_set_add_dims(S, isl_dim_set, -DimDiff);
+   else
+     Set = S;
+@@ -1183,6 +1186,7 @@ PVAff &PVAff::simplify(const PVSet &S) {
+   //S.intersect(isl_set_copy(OkCtx));
+   OkCtx = isl_set_add_dims(OkCtx, isl_dim_set, getNumInputDimensions());
+   Obj = isl_pw_aff_gist(Obj, OkCtx);
++  Obj = isl_pw_aff_coalesce(Obj);
+   dropUnusedParameters();
+   return *this;
+ }
+@@ -1218,6 +1222,11 @@ PVAff &PVAff::union_min(const PVAff &PV) {
+   return *this;
+ }
+ 
++PVAff &PVAff::union_max(const PVAff &PV) {
++  Obj = getCombinatorFn(isl_pw_aff_union_max)(Obj, PV);
++  return *this;
++}
++
+ PVAff &PVAff::select(const PVAff &PV0, const PVAff &PV1) {
+   isl_pw_aff *PV0Obj = PV0;
+   isl_pw_aff *PV1Obj = PV1;
+diff --git a/lib/Analysis/PolyhedralExpressionBuilder.cpp b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+index 4ead5cd..de7df87 100644
+--- a/lib/Analysis/PolyhedralExpressionBuilder.cpp
++++ b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+@@ -159,6 +159,7 @@ PEXP *PolyhedralExpressionBuilder::getBackedgeTakenCount(const Loop &L) {
+   else
+     PE->PWA = PVAff::getBackEdgeTakenCountFromDomain(HeaderBBDom);
+ 
++  PE->PWA.simplify(HeaderBBDom);
+   PE->setKind(PE->PWA.isInteger() ? PEXP::EK_INTEGER : PEXP::EK_UNKNOWN_VALUE);
+ 
+   DEBUG(dbgs() << "Backedge taken count for " << L.getName() << "\n\t=>" << PE
+@@ -215,10 +216,13 @@ bool PolyhedralExpressionBuilder::getEdgeCondition(PVSet &EdgeCondition,
+ 
+   auto *Int64Ty = Type::getInt64Ty(TI.getContext());
+   if (isa<BranchInst>(TI)) {
++    EdgeCondition = PVSet::empty(EdgeCondition);
+     if (TI.getSuccessor(0) == &BB)
+-      EdgeCondition = buildEqualDomain(TermPE, *ConstantInt::get(Int64Ty, 1));
++      EdgeCondition.unify(
++          buildEqualDomain(TermPE, *ConstantInt::get(Int64Ty, 1)));
+     if (TI.getSuccessor(1) == &BB)
+-      EdgeCondition.unify(buildEqualDomain(TermPE, *ConstantInt::get(Int64Ty, 0)));
++      EdgeCondition.unify(
++          buildEqualDomain(TermPE, *ConstantInt::get(Int64Ty, 0)));
+     return true;
+   }
+ 
+@@ -334,7 +338,7 @@ PEXP *PolyhedralExpressionBuilder::getDomain(BasicBlock &BB) {
+       ForgetDomainsInLoop(*L);
+       return PE->invalidate();
+     }
+-    PE->PWA.union_add(PredDomPWA);
++    PE->PWA.union_max(PredDomPWA);
+ 
+     // Sanity check
+     assert(PE->PWA.getNumInputDimensions() == LD);
+@@ -425,7 +429,7 @@ PEXP *PolyhedralExpressionBuilder::getDomain(BasicBlock &BB) {
+   //if (Domain.isEmpty())
+     //PE->invalidate();
+   //else
+-    //PE->setDomain(Domain, true);
++    PE->setDomain(Domain, true);
+ 
+   ForgetDomainsInLoop(*L);
+ 
+diff --git a/lib/Analysis/PolyhedralValueInfo.cpp b/lib/Analysis/PolyhedralValueInfo.cpp
+index b129a5d..daa9ce2 100644
+--- a/lib/Analysis/PolyhedralValueInfo.cpp
++++ b/lib/Analysis/PolyhedralValueInfo.cpp
+@@ -21,6 +21,9 @@
+ #include "llvm/Support/Debug.h"
+ #include "llvm/Support/raw_ostream.h"
+ 
++#include "isl/ast.h"
++#include "isl/ast_build.h"
++
+ #include <cassert>
+ 
+ using namespace llvm;
+@@ -354,6 +357,9 @@ bool PolyhedralValueInfo::isVaryingInScope(Instruction &I, Loop *Scope,
+     return false;
+   if (Strict)
+     return true;
++  Loop *L = LI.getLoopFor(I.getParent());
++  if (L == Scope)
++    return false;
+   if (I.mayReadFromMemory()) {
+     if (!NoAlias)
+       return true;
+@@ -365,7 +371,6 @@ bool PolyhedralValueInfo::isVaryingInScope(Instruction &I, Loop *Scope,
+     return isVaryingInScope(*cast<Instruction>(Ptr), Scope, Strict, NoAlias);
+   }
+ 
+-  Loop *L = nullptr;
+   if (auto *PHI = dyn_cast<PHINode>(&I)) {
+     if (Scope && PHI->getParent() == Scope->getHeader())
+       return false;
+@@ -551,6 +556,30 @@ void PolyhedralValueInfo::print(raw_ostream &OS) const {
+     OS << "V: " << *It.first.first << " in " << (L ? L->getName() : "<max>")
+        << ":\n\t" << It.second << "\n";
+   }
++
++
++  PVSet DomS, DomT;
++  for (BasicBlock &BB : *(*LI.begin())->getHeader()->getParent()) {
++    if (BB.getName() == "S")
++      DomS = getDomainFor(&BB)->getDomain();
++    if (BB.getName() == "T")
++      DomT = getDomainFor(&BB)->getDomain();
++  }
++
++  OS<< "\n\nDomS: " << DomS << "\nDomT: " << DomT <<"\n";
++  DomT = DomT.dropLastInputDims(1);
++  OS<< "DomT: " << DomT <<"\n";
++  PVSet R = DomS;
++  R.subtract(DomT);
++  OS << "R: " << R << " DomS: " << DomS << "\n";
++  R.dropUnusedParameters();
++  DomS.dropUnusedParameters();
++  R = R.simplify(DomS);
++  OS << "R: "<<R<<"\n";
++
++  auto *ASTB = isl_ast_build_from_context(isl_set_params(DomS.getObj()));
++  auto *RExp = isl_ast_build_expr_from_set(ASTB, isl_set_params(R.getObj()));
++  isl_ast_expr_dump(RExp);
+ }
+ 
+ // ------------------------------------------------------------------------- //
+-- 
+1.8.3.1
+

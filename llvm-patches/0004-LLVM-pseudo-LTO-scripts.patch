@@ -1,0 +1,1051 @@
+From 23b84c6d6826a10ab9e3e39d62c23a7f012bcdfb Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Wed, 13 Dec 2017 16:32:06 +0100
+Subject: [PATCH 04/29] LLVM pseudo LTO scripts
+
+---
+ include/llvm/Analysis/PValue.h               |  33 ++-
+ include/llvm/Analysis/PolyhedralAccessInfo.h |  13 +-
+ include/llvm/Analysis/PolyhedralUtils.h      | 159 +++++++++++++
+ include/llvm/Analysis/PolyhedralValueInfo.h  |   2 +
+ lib/Analysis/CMakeLists.txt                  |   3 +-
+ lib/Analysis/PValue.cpp                      |  78 ++++++
+ lib/Analysis/PolyhedralAccessInfo.cpp        |  55 +++--
+ lib/Analysis/PolyhedralUtils.cpp             |  23 ++
+ lib/Analysis/PolyhedralValueInfo.cpp         |  30 ++-
+ utils/llvm_bc_generator                      | 342 +++++++++++++++++++++++++++
+ utils/llvm_bc_generator++                    |   1 +
+ 11 files changed, 709 insertions(+), 30 deletions(-)
+ create mode 100644 include/llvm/Analysis/PolyhedralUtils.h
+ create mode 100644 lib/Analysis/PolyhedralUtils.cpp
+ create mode 100755 utils/llvm_bc_generator
+ create mode 120000 utils/llvm_bc_generator++
+
+diff --git a/include/llvm/Analysis/PValue.h b/include/llvm/Analysis/PValue.h
+index 61f910c..81ba36b 100644
+--- a/include/llvm/Analysis/PValue.h
++++ b/include/llvm/Analysis/PValue.h
+@@ -38,6 +38,10 @@ struct isl_pw_aff;
+ namespace llvm {
+ class PVAff;
+ 
++template <typename PVType> struct PVLess {
++  bool operator()(const PVType &lhs, const PVType &rhs) const;
++};
++
+ class PVBase {
+   friend class PVAff;
+   friend class PVMap;
+@@ -108,8 +112,11 @@ public:
+   std::string str() const;
+ 
+   operator bool() const { return Obj != nullptr; }
+-};
+ 
++  bool operator<(const PVId &Other) const;
++
++  friend class PVLess<PVId>;
++};
+ 
+ class PVSet : public PVBase {
+   friend class PVAff;
+@@ -261,11 +268,16 @@ public:
+   PVMap &addToOutputDimension(const PVMap &Other, unsigned Dim);
+ 
+   int getParameterPosition(const PVId &Id) const;
++  void eliminateParameter(unsigned Pos);
+   void eliminateParameter(const PVId &Id);
+ 
+   PVSet getParameterSet() const;
+ 
++  void equateParameters(unsigned Pos0, unsigned Pos1);
++  void equateParameters(const PVId &Id0, const PVId &Id1);
++
+   PVId getParameter(unsigned No) const;
++  PVMap &setParameter(unsigned No, const PVId &Id);
+ 
+   PVId getInputId() const;
+   PVId getOutputId() const;
+@@ -284,6 +296,10 @@ public:
+   PVMap &union_add(const PVMap &PM);
+   PVMap &floordiv(int64_t V);
+ 
++  PVMap &preimage(const PVAff &PWA, bool Range = true);
++  PVMap &preimageDomain(const PVAff &PWA);
++  PVMap &preimageRange(const PVAff &PWA);
++
+   std::string str() const;
+ };
+ 
+@@ -365,7 +381,12 @@ public:
+ 
+   PVAff &fixParamDim(unsigned Dim, int64_t Value);
+   PVAff &fixInputDim(unsigned Dim, int64_t Value);
++  PVAff &equateInputDim(unsigned Dim, const PVId &Id);
+   PVAff &setInputLowerBound(unsigned Dim, int64_t Value);
++
++  PVAff &setInputId(const PVId &Id);
++  PVAff &setOutputId(const PVId &Id);
++
+   PVAff &floordiv(int64_t V);
+ 
+   PVAff &maxInLastInputDims(unsigned Dims);
+@@ -415,6 +436,16 @@ public:
+   std::string str() const;
+ };
+ 
++template<typename PVType>
++struct PVRewriter {
++  virtual PVType rewrite(const PVType &Obj) {
++    PVType Copy(Obj);
++    rewrite(Copy);
++    return Copy;
++  };
++  virtual void rewrite(PVType &Obj) {};
++};
++
+ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const PVBase &PV);
+ 
+ } // end namespace llvm
+diff --git a/include/llvm/Analysis/PolyhedralAccessInfo.h b/include/llvm/Analysis/PolyhedralAccessInfo.h
+index c175d96..854d2c9 100644
+--- a/include/llvm/Analysis/PolyhedralAccessInfo.h
++++ b/include/llvm/Analysis/PolyhedralAccessInfo.h
+@@ -16,6 +16,7 @@
+ #include "llvm/IR/PassManager.h"
+ #include "llvm/Pass.h"
+ #include "llvm/Analysis/PValue.h"
++#include "llvm/Analysis/PolyhedralUtils.h"
+ 
+ namespace llvm {
+ 
+@@ -142,6 +143,8 @@ public:
+ 
+   bool contains(Instruction *I) const { return Contains(I); }
+ 
++  void rewrite(PVRewriter<PVMap> &Rewriter);
++
+   ~PACCSummary();
+ 
+ private:
+@@ -215,13 +218,13 @@ public:
+   const PACC *getAsAccess(Instruction *Inst, Loop *Scope = nullptr);
+ 
+   /// Return an access summary for the blocks in @p Blocks.
+-  const PACCSummary *getAccessSummary(ArrayRef<BasicBlock *> Blocks,
+-                                      PACCSummary::SummaryScopeKind Kind,
+-                                      Loop *Scope = nullptr);
++  PACCSummary *getAccessSummary(ArrayRef<BasicBlock *> Blocks,
++                                PACCSummary::SummaryScopeKind Kind,
++                                Loop *Scope = nullptr);
+ 
+   /// Return an access summary for the function @p F.
+-  const PACCSummary *getAccessSummary(Function &F,
+-                                      PACCSummary::SummaryScopeKind Kind);
++  PACCSummary *getAccessSummary(Function &F,
++                                PACCSummary::SummaryScopeKind Kind);
+ 
+   /// Return true if @p PA represents a value that is fixed for one function
+   /// invocation.
+diff --git a/include/llvm/Analysis/PolyhedralUtils.h b/include/llvm/Analysis/PolyhedralUtils.h
+new file mode 100644
+index 0000000..4c7571d
+--- /dev/null
++++ b/include/llvm/Analysis/PolyhedralUtils.h
+@@ -0,0 +1,159 @@
++//===--- PolyhedralUtils.h --- Polyhedral Helper Classes --------*- C++ -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef POLYHEDRAL_UTILS_H
++#define POLYHEDRAL_UTILS_H
++
++#include "llvm/Analysis/PValue.h"
++#include "llvm/IR/IntrinsicInst.h"
++
++namespace llvm {
++
++template<typename PVType, bool UseGlobalIdx = true>
++struct NVVMRewriter : public PVRewriter<PVType> {
++  enum NVVMDim {
++    NVVMDIM_NONE,
++    NVVMDIM_X,
++    NVVMDIM_Y,
++    NVVMDIM_Z,
++    NVVMDIM_W,
++  };
++
++  static constexpr unsigned NumNVVMDims = 4;
++  NVVMDim NVVMDims[NumNVVMDims] = {NVVMDIM_X, NVVMDIM_Y, NVVMDIM_Z, NVVMDIM_W};
++
++  bool isIntrinsic(Value *V, Intrinsic::ID IntrId) {
++    auto *Intr = dyn_cast<IntrinsicInst>(V);
++    return Intr && Intr->getIntrinsicID() == IntrId;
++  }
++
++  NVVMDim getBlockOffsetDim(Value *V) {
++    auto *Inst = dyn_cast<Instruction>(V);
++    if (!Inst)
++      return NVVMDIM_NONE;
++
++    if (Inst->getOpcode() != Instruction::Mul)
++      return NVVMDIM_NONE;
++
++    Value *Op0 = Inst->getOperand(0);
++    Value *Op1 = Inst->getOperand(1);
++
++    std::pair<Intrinsic::ID, Intrinsic::ID> IdPairs[] = {
++        {Intrinsic::nvvm_read_ptx_sreg_ntid_x,
++         Intrinsic::nvvm_read_ptx_sreg_ctaid_x},
++        {Intrinsic::nvvm_read_ptx_sreg_ntid_y,
++         Intrinsic::nvvm_read_ptx_sreg_ctaid_y},
++        {Intrinsic::nvvm_read_ptx_sreg_ntid_z,
++         Intrinsic::nvvm_read_ptx_sreg_ctaid_z},
++        {Intrinsic::nvvm_read_ptx_sreg_ntid_w,
++         Intrinsic::nvvm_read_ptx_sreg_ctaid_w}};
++
++    for (unsigned d = 0; d < NumNVVMDims; d++) {
++      auto IdPair = IdPairs[d];
++      if ((isIntrinsic(Op0, IdPair.first) && isIntrinsic(Op1, IdPair.second)) ||
++          (isIntrinsic(Op1, IdPair.first) && isIntrinsic(Op0, IdPair.second)))
++        return NVVMDims[d];
++    }
++
++    return NVVMDIM_NONE;
++  }
++
++  virtual void rewrite(PVType &Obj) override {
++    SmallVector<PVId, 4> ThreadIdCallsPerDim[NumNVVMDims];
++
++    Intrinsic::ID ThreadIdIntrinsicIds[] = {
++        Intrinsic::nvvm_read_ptx_sreg_tid_x,
++        Intrinsic::nvvm_read_ptx_sreg_tid_y,
++        Intrinsic::nvvm_read_ptx_sreg_tid_z,
++        Intrinsic::nvvm_read_ptx_sreg_tid_w};
++
++    for (unsigned d = 0, e = Obj.getNumParameters(); d < e; d++) {
++      const PVId &Id = Obj.getParameter(d);
++      auto *IdValue = Id.getPayloadAs<Value *>();
++      for (unsigned u = 0; u < NumNVVMDims; u++) {
++        Intrinsic::ID ThreadIdIntrinsicId = ThreadIdIntrinsicIds[u];
++        if (!isIntrinsic(IdValue, ThreadIdIntrinsicId))
++          continue;
++        ThreadIdCallsPerDim[u].push_back(Id);
++        break;
++      }
++    }
++
++    for (const auto &ThreadIdCalls : ThreadIdCallsPerDim) {
++      while (ThreadIdCalls.size() > 1) {
++        Obj.equateParameters(ThreadIdCalls[0], ThreadIdCalls[1]);
++        Obj.eliminateParameter(ThreadIdCalls[1]);
++      }
++    }
++
++    PVId BlockOffset[NumNVVMDims];
++    for (unsigned d = 0, e = Obj.getNumParameters(); d < e; d++) {
++      const PVId &Id = Obj.getParameter(d);
++      auto *IdValue = Id.getPayloadAs<Value *>();
++
++      switch (getBlockOffsetDim(IdValue)) {
++      case NVVMDIM_X:
++        assert(!BlockOffset[0] && "TODO: Handle multiple block "
++                                               "offsets in the same "
++                                               "dimension!\n");
++        BlockOffset[0] = PVId(Id, "nvvm_block_offset_x", IdValue);
++        Obj.setParameter(d, BlockOffset[0]);
++        continue;
++      case NVVMDIM_Y:
++        assert(!BlockOffset[1] && "TODO: Handle multiple block "
++                                               "offsets in the same "
++                                               "dimension!\n");
++        BlockOffset[1] = PVId(Id, "nvvm_block_offset_y", IdValue);
++        Obj.setParameter(d, BlockOffset[1]);
++        continue;
++      case NVVMDIM_Z:
++        assert(!BlockOffset[2] && "TODO: Handle multiple block "
++                                               "offsets in the same "
++                                               "dimension!\n");
++        BlockOffset[2] = PVId(Id, "nvvm_block_offset_z", IdValue);
++        Obj.setParameter(d, BlockOffset[2]);
++        continue;
++      case NVVMDIM_W:
++        assert(!BlockOffset[3] && "TODO: Handle multiple block "
++                                               "offsets in the same "
++                                               "dimension!\n");
++        BlockOffset[3] = PVId(Id, "nvvm_block_offset_w", IdValue);
++        Obj.setParameter(d, BlockOffset[3]);
++        continue;
++      case NVVMDIM_NONE:
++        continue;
++      }
++    }
++
++    if (!UseGlobalIdx)
++      return;
++
++    for (unsigned d = 0; d < NumNVVMDims; d++) {
++      if (!BlockOffset[d] || ThreadIdCallsPerDim[d].empty())
++        continue;
++
++      const PVId &ThreadId = ThreadIdCallsPerDim[d][0];
++      PVId GlobalIdx = PVId(ThreadId, "nvvm_global_id_x", nullptr);
++      PVAff Translator(Obj, 0, 1, ThreadId);
++      Translator.add(PVAff(Obj, 0, 1, BlockOffset[d]));
++      Translator.equateInputDim(0, GlobalIdx);
++      Translator.setInputId(Obj.getOutputId());
++      Obj = Obj.preimage(Translator);
++    }
++
++  }
++
++private:
++};
++
++
++} // namespace llvm
++#endif
+diff --git a/include/llvm/Analysis/PolyhedralValueInfo.h b/include/llvm/Analysis/PolyhedralValueInfo.h
+index f2b7b1d..03a72b2 100644
+--- a/include/llvm/Analysis/PolyhedralValueInfo.h
++++ b/include/llvm/Analysis/PolyhedralValueInfo.h
+@@ -238,6 +238,8 @@ class PolyhedralValueInfoCache final {
+     return PE;
+   }
+ 
++  std::string getParameterNameForValue(Value &V);
++
+   /// Return the unique parameter id for @p V.
+   PVId getParameterId(Value &V, const PVCtx &Ctx);
+ 
+diff --git a/lib/Analysis/CMakeLists.txt b/lib/Analysis/CMakeLists.txt
+index 0f17de1..56f0e28 100644
+--- a/lib/Analysis/CMakeLists.txt
++++ b/lib/Analysis/CMakeLists.txt
+@@ -66,10 +66,11 @@ add_llvm_library(LLVMAnalysis
+   OptimizationRemarkEmitter.cpp
+   OrderedBasicBlock.cpp
+   PHITransAddr.cpp
+-  PolyhedralValueInfo.cpp
+   PolyhedralAccessInfo.cpp
+   PolyhedralDependenceInfo.cpp
+   PolyhedralExpressionBuilder.cpp
++  PolyhedralValueInfo.cpp
++  PolyhedralUtils.cpp
+   PostDominators.cpp
+   ProfileSummaryInfo.cpp
+   PtrUseVisitor.cpp
+diff --git a/lib/Analysis/PValue.cpp b/lib/Analysis/PValue.cpp
+index 67297f4..52d467f 100644
+--- a/lib/Analysis/PValue.cpp
++++ b/lib/Analysis/PValue.cpp
+@@ -146,6 +146,15 @@ std::string PVId::str() const {
+   return Result;
+ }
+ 
++bool PVId::operator<(const PVId &Other) const {
++  return isl_id_get_hash(Obj) < isl_id_get_hash(Other);
++}
++
++template <>
++bool PVLess<PVId>::operator()(const PVId &lhs, const PVId &rhs) const {
++  return isl_id_get_hash(lhs) < isl_id_get_hash(rhs);
++}
++
+ /* -------------------- PVSet ------------------------ */
+ 
+ PVSet::PVSet(isl_set *S) : Obj(S) {}
+@@ -466,6 +475,7 @@ PVSet &PVSet::setInputLowerBound(unsigned Dim, int64_t Value) {
+ 
+ PVSet &PVSet::preimage(const PVAff &PWA) {
+   Obj = isl_set_preimage_pw_multi_aff(Obj, isl_pw_multi_aff_from_pw_aff(PWA));
++  dropUnusedParameters();
+   return *this;
+ }
+ 
+@@ -642,6 +652,10 @@ int PVMap::getParameterPosition(const PVId &Id) const {
+ void PVMap::eliminateParameter(const PVId &Id) {
+   int Pos = getParameterPosition(Id);
+   assert(Pos >= 0);
++  return eliminateParameter(Pos);
++}
++
++void PVMap::eliminateParameter(unsigned Pos) {
+   Obj = isl_map_project_out(Obj, isl_dim_param, Pos, 1);
+ }
+ 
+@@ -649,10 +663,28 @@ PVSet PVMap::getParameterSet() const {
+   return isl_map_params(isl_map_copy(Obj));
+ }
+ 
++void PVMap::equateParameters(unsigned Pos0, unsigned Pos1) {
++  assert(Pos0 < getNumParameters() && Pos1 < getNumParameters());
++  Obj = isl_map_equate(Obj, isl_dim_param, Pos0, isl_dim_param, Pos1);
++}
++
++void PVMap::equateParameters(const PVId &Id0, const PVId &Id1) {
++  int Pos0 = getParameterPosition(Id0);
++  int Pos1 = getParameterPosition(Id1);
++  if (Pos0 < 0 || Pos1 < 0)
++    return;
++  return equateParameters(Pos0, Pos1);
++}
++
+ PVId PVMap::getParameter(unsigned No) const {
+   return PVId(isl_map_get_dim_id(Obj, isl_dim_param, No));
+ }
+ 
++PVMap &PVMap::setParameter(unsigned No, const PVId &Id) {
++  Obj = isl_map_set_dim_id(Obj, isl_dim_param, No, Id);
++  return *this;
++}
++
+ PVId PVMap::getInputId() const {
+   return isl_map_get_tuple_id(Obj, isl_dim_in);
+ }
+@@ -982,6 +1014,20 @@ PVAff &PVAff::fixInputDim(unsigned Dim, int64_t Value) {
+   return *this;
+ }
+ 
++PVAff &PVAff::equateInputDim(unsigned Dim, const PVId &Id) {
++  int Pos = getParameterPosition(Id);
++  if (Pos < 0) {
++    Pos = getNumParameters();
++    Obj = isl_pw_aff_add_dims(Obj, isl_dim_param, 1);
++    Obj = isl_pw_aff_set_dim_id(Obj, isl_dim_param, Pos, Id);
++  }
++  assert(Pos >= 0);
++  PVSet Dom = getDomain();
++  Dom.equateInputDim(Dim, Id);
++  intersectDomain(Dom);
++  return *this;
++}
++
+ PVAff &PVAff::setInputLowerBound(unsigned Dim,
+                                  int64_t Value) {
+   auto *Dom = isl_pw_aff_domain(isl_pw_aff_copy(Obj));
+@@ -990,6 +1036,16 @@ PVAff &PVAff::setInputLowerBound(unsigned Dim,
+   return *this;
+ }
+ 
++PVAff &PVAff::setInputId(const PVId &Id) {
++  Obj = isl_pw_aff_set_tuple_id(Obj, isl_dim_in, Id);
++  return *this;
++}
++
++PVAff &PVAff::setOutputId(const PVId &Id) {
++  Obj = isl_pw_aff_set_tuple_id(Obj, isl_dim_out, Id);
++  return *this;
++}
++
+ PVAff &PVAff::intersectDomain(const PVSet &Dom) {
+   auto DomDim = Dom.getNumInputDimensions();
+   auto PWADim = getNumInputDimensions();
+@@ -1287,6 +1343,28 @@ PVAff PVAff::getBackEdgeTakenCountFromDomain(const PVSet &Dom) {
+   return PVAff(MaxPWA);
+ }
+ 
++PVMap &PVMap::preimage(const PVAff &PWA, bool Range) {
++  if (Range)
++    return preimageRange(PWA);
++  return preimageDomain(PWA);
++}
++
++PVMap &PVMap::preimageDomain(const PVAff &PWA) {
++  isl_pw_multi_aff *PWMA =  isl_pw_multi_aff_from_pw_aff(PWA);
++  PWMA = isl_pw_multi_aff_set_tuple_id(PWMA, isl_dim_in, getInputId());
++  Obj = isl_map_preimage_domain_pw_multi_aff(Obj, PWMA);
++  dropUnusedParameters();
++  return *this;
++}
++
++PVMap &PVMap::preimageRange(const PVAff &PWA) {
++  isl_pw_multi_aff *PWMA =  isl_pw_multi_aff_from_pw_aff(PWA);
++  PWMA = isl_pw_multi_aff_set_tuple_id(PWMA, isl_dim_out, getOutputId());
++  Obj = isl_map_preimage_range_pw_multi_aff(Obj, PWMA);
++  dropUnusedParameters();
++  return *this;
++}
++
+ std::string PVAff::str() const {
+   char *cstr = isl_pw_aff_to_str(Obj);
+   if (!cstr)
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index 8be502f..81ebf03 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -339,6 +339,16 @@ void PACCSummary::finalize(PolyhedralValueInfo &PI,
+   }
+ }
+ 
++void PACCSummary::rewrite(PVRewriter<PVMap> &Rewriter) {
++  for (auto AIt : *this) {
++    ArrayInfo *AI = AIt.second;
++    Rewriter.rewrite(AI->MayWriteMap);
++    Rewriter.rewrite(AI->MustWriteMap);
++    Rewriter.rewrite(AI->MayReadMap);
++    Rewriter.rewrite(AI->MustReadMap);
++  }
++}
++
+ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+   OS << "\nPACC summary\n";
+ 
+@@ -358,8 +368,8 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+        It++)
+     OS << "\t - " << *It << "\n";
+ 
+-  SmallPtrSet<Value *, 8> ParameterSet;
+-  SmallVector<Value *, 8> ParameterVector;
++  std::set<PVId> ParameterSet;
++  SmallVector<PVId, 8> ParameterVector;
+   OS << "Array infos:\n";
+   for (auto AIt : *this) {
+     Value *BasePointer = AIt.first;
+@@ -392,10 +402,13 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+ 
+   OS << "Referenced parameters:\n";
+   if (PVI) {
+-    SmallPtrSet<Value *, 8> ParameterWorklist(ParameterSet);
++    std::set<PVId> ParameterWorklist(ParameterSet);
+     while (!ParameterWorklist.empty()) {
+-      Value *Parameter = *ParameterWorklist.begin();
+-      ParameterWorklist.erase(Parameter);
++      const PVId &ParameterId = *ParameterWorklist.begin();
++      ParameterWorklist.erase(ParameterId);
++      if (!ParameterId.getPayload())
++        continue;
++      Value *Parameter = ParameterId.getPayloadAs<Value *>();
+       auto *ParameterInst = dyn_cast<Instruction>(Parameter);
+       if (!ParameterInst)
+         continue;
+@@ -403,22 +416,30 @@ void PACCSummary::print(raw_ostream &OS, PolyhedralValueInfo *PVI) const {
+         const PEXP *ParameterPE = PVI->getPEXP(ParameterOperand, Scope);
+         ParameterVector.clear();
+         PVI->getParameters(ParameterPE, ParameterVector);
+-        for (Value *NewParameter : ParameterVector) {
+-          if (!ParameterSet.insert(NewParameter).second)
++        for (const PVId NewParameterId : ParameterVector) {
++          if (!ParameterSet.insert(NewParameterId).second)
+             continue;
+-          ParameterWorklist.insert(NewParameter);
++          ParameterWorklist.insert(NewParameterId);
+         }
+       }
+     }
+   }
+-  for (Value *Parameter : ParameterSet) {
++  for (const PVId &ParameterId : ParameterSet) {
++    if (!ParameterId.getPayload()) {
++      OS << "\t\t - " << ParameterId.str() << " (P)\n";
++      continue;
++    }
++
++    Value *Parameter = ParameterId.getPayloadAs<Value *>();
+     if (auto *ArgumentParameter = dyn_cast<Argument>(Parameter)) {
+-      OS << "\t\t - argument (" << ArgumentParameter->getArgNo()
+-         << "):  " << *Parameter << "\n";
++      OS << "\t\t - " << ParameterId.str() << " (A)("
++         << ArgumentParameter->getArgNo() << "):  " << *Parameter << "\n";
+     } else if (isa<Instruction>(Parameter)) {
+-      OS << "\t\t -  instruction:" << *Parameter << "\n";
++      OS << "\t\t - " << ParameterId.str() << " (I):" << *Parameter << "\n";
++    } else if (isa<Function>(Parameter)) {
++      OS << "\t\t - " << ParameterId.str() << " (F)\n";
+     } else {
+-      OS << "\t\t - unknown: " << *Parameter << "\n";
++      OS << "\t\t - " << ParameterId.str() << " (U): " << *Parameter << "\n";
+     }
+   }
+ }
+@@ -487,7 +508,7 @@ const PACC *PolyhedralAccessInfo::getAsAccess(Instruction *Inst, Loop *Scope) {
+   return nullptr;
+ }
+ 
+-const PACCSummary *
++PACCSummary *
+ PolyhedralAccessInfo::getAccessSummary(Function &F,
+                                        PACCSummary::SummaryScopeKind Kind) {
+   SmallVector<BasicBlock *, 32> Blocks;
+@@ -497,7 +518,7 @@ PolyhedralAccessInfo::getAccessSummary(Function &F,
+   return getAccessSummary(Blocks, Kind);
+ }
+ 
+-const PACCSummary *
++PACCSummary *
+ PolyhedralAccessInfo::getAccessSummary(ArrayRef<BasicBlock *> Blocks,
+                                        PACCSummary::SummaryScopeKind Kind,
+                                        Loop *Scope) {
+@@ -573,7 +594,9 @@ bool PolyhedralAccessInfoWrapperPass::runOnFunction(Function &F) {
+ 
+ void PolyhedralAccessInfoWrapperPass::print(raw_ostream &OS,
+                                             const Module *) const {
+-  const PACCSummary *PS = PAI->getAccessSummary(*F, PACCSummary::SSK_COMPLETE);
++  PACCSummary *PS = PAI->getAccessSummary(*F, PACCSummary::SSK_COMPLETE);
++  NVVMRewriter<PVMap, /* UseGlobalIdx */ true> CudaRewriter;
++  PS->rewrite(CudaRewriter);
+   PS->print(OS, &PAI->getPolyhedralValueInfo());
+ }
+ 
+diff --git a/lib/Analysis/PolyhedralUtils.cpp b/lib/Analysis/PolyhedralUtils.cpp
+new file mode 100644
+index 0000000..df835bd
+--- /dev/null
++++ b/lib/Analysis/PolyhedralUtils.cpp
+@@ -0,0 +1,23 @@
++//===--- PolyhedralUtils.cpp --- Polyhedral Utility Classes & Functions ---===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/Analysis/PolyhedralUtils.h"
++
++#include "llvm/Analysis/PolyhedralValueInfo.h"
++#include "llvm/Analysis/PolyhedralAccessInfo.h"
++
++#include <cassert>
++
++using namespace llvm;
++
++#define DEBUG_TYPE "polyhedral-utils"
++
+diff --git a/lib/Analysis/PolyhedralValueInfo.cpp b/lib/Analysis/PolyhedralValueInfo.cpp
+index 093a176..6dc836f 100644
+--- a/lib/Analysis/PolyhedralValueInfo.cpp
++++ b/lib/Analysis/PolyhedralValueInfo.cpp
+@@ -54,8 +54,6 @@ PEXP *PEXP::setDomain(const PVSet &Domain, bool Overwrite) {
+     return invalidate();
+   }
+ 
+-  errs() << "ID: " << InvalidDomain << " KD: " << KnownDomain << "\n";
+-
+   setKind(PEXP::EK_DOMAIN);
+   PWA = PVAff(Domain, 1);
+   PWA.dropUnusedParameters();
+@@ -68,7 +66,6 @@ PEXP *PEXP::setDomain(const PVSet &Domain, bool Overwrite) {
+     PWA.simplify(KnownDomain);
+ 
+   // Sanity check
+-  errs() << "ID: " << InvalidDomain << " KD: " << KnownDomain << "\n";
+   assert(KnownDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
+   assert(InvalidDomain.getNumInputDimensions() == PWA.getNumInputDimensions());
+ 
+@@ -185,14 +182,33 @@ PolyhedralValueInfoCache::~PolyhedralValueInfoCache() {
+   ParameterMap.clear();
+ }
+ 
++std::string PolyhedralValueInfoCache::getParameterNameForValue(Value &V) {
++  if (IntrinsicInst *Intr = dyn_cast<IntrinsicInst>(&V)) {
++    switch (Intr->getIntrinsicID()) {
++    case Intrinsic::nvvm_read_ptx_sreg_tid_x:
++      return "nvvm_tid_x";
++    case Intrinsic::nvvm_read_ptx_sreg_tid_y:
++      return "nvvm_tid_y";
++    case Intrinsic::nvvm_read_ptx_sreg_tid_z:
++      return "nvvm_tid_z";
++    case Intrinsic::nvvm_read_ptx_sreg_tid_w:
++      return "nvvm_tid_w";
++    default:
++      break;
++    }
++  }
++
++  if (V.hasName())
++    return V.getName().str();
++  return "p" + std::to_string(ParameterMap.size());
++}
++
+ PVId PolyhedralValueInfoCache::getParameterId(Value &V, const PVCtx &Ctx) {
+   PVId &Id = ParameterMap[&V];
+   if (Id)
+     return Id;
+ 
+-  std::string ParameterName;
+-  ParameterName = V.hasName() ? V.getName().str()
+-                              : "p" + std::to_string(ParameterMap.size());
++  std::string ParameterName = getParameterNameForValue(V);
+   ParameterName = PVBase::getIslCompatibleName("", ParameterName, "");
+   DEBUG(dbgs() << "NEW PARAM: " << V << " ::: " << ParameterName << "\n";);
+   Id = PVId(Ctx, ParameterName, &V);
+@@ -259,7 +275,7 @@ bool PolyhedralValueInfo::isVaryingInScope(Instruction &I, Loop *Scope,
+     return false;
+   if (Strict)
+     return true;
+-  if (I.mayReadFromMemory() || isa<CallInst>(I))
++  if (I.mayReadFromMemory())
+     return true;
+ 
+   Loop *L = nullptr;
+diff --git a/utils/llvm_bc_generator b/utils/llvm_bc_generator
+new file mode 100755
+index 0000000..9042fe1
+--- /dev/null
++++ b/utils/llvm_bc_generator
+@@ -0,0 +1,342 @@
++#!/usr/bin/python
++import sys, os, subprocess, random
++
++###############################################################################
++############################# Helper functions ################################
++###############################################################################
++def center(string, columns = 80):
++  length = len(string)
++  return "%s%s%s" % (" " * int((columns + 1 - length) / 2),
++                     string,
++                     " " * int((columns + 0 - length) / 2))
++
++def exists(full_path):
++  return full_path and os.access(full_path, os.X_OK)
++
++def no_ext(filename):
++  return os.path.splitext(filename)[0]
++
++def which(program):
++  path = os.getenv('PATH')
++  if not path:
++    return None
++  for sub_path in path.split(':'):
++    full_path = os.path.join(sub_path, program)
++    if exists(full_path):
++      return full_path
++  return None
++
++def call(program, arguments):
++  try:
++    proc = subprocess.Popen([program] + arguments, stdout=sys.stdout, stderr=sys.stderr)
++    retcode = proc.wait()
++    if retcode:
++      sys.stderr.write("\nERROR:\n------\n")
++      sys.stderr.write("Got return code %s while executing:\n  %s %s\n\n" % (retcode, program, " ".join(arguments)))
++    return retcode
++  except Exception as e:
++    sys.stderr.write("\nERROR:\n------\n")
++    sys.stderr.write("Got an exception while executing:\n  %s %s\n%s\n\n" % (program, " ".join(arguments), repr(e)))
++    return 254
++
++###############################################################################
++############################# Global constants ################################
++###############################################################################
++
++# Enable DEBUG mode
++DEBUG = False
++
++# The name of this 'compiler'
++NAME = "LLVM-Link-All"
++
++
++# The environment variables with functions to derive their default values
++env_variables = {
++    'CLANG': ((lambda : which('clang')), True),
++    'CLANG++': ((lambda : which('clang++')), True),
++    'LLVM_LINK': ((lambda : which('llvm-link')), True),
++  }
++
++# Flag replacements
++flag_replacements = {
++    # '-O3' : ' -O3',
++    #'-g' : '',
++    }
++
++
++###############################################################################
++
++
++if DEBUG:
++  print ("\n%s" % (center(NAME)))
++
++if DEBUG:
++  print ("\n Check environment variables:")
++
++variables = {}
++for variable, default_pair in env_variables.items():
++  val_inv, def_inv = "", ""
++  default_fn, is_path = default_pair
++  default = default_fn()
++  value = os.getenv(variable, default)
++
++  if is_path:
++    if not exists(default):
++      def_inv = " INVALID!"
++    if not exists(value):
++      val_inv = " INVALID!"
++
++  variables[variable] = value
++  if DEBUG:
++    print ("   %-25s := %s%s \t\t(default: %s%s)" % (variable, value, val_inv, default, def_inv))
++
++COMPILER = 'CLANG++' if sys.argv[0].endswith('++') else 'CLANG'
++
++for variable, value in variables.items():
++  if env_variables[variable][1] and not exists(value):
++    sys.stderr.write("\nERROR:\n------\n")
++    sys.stderr.write("The executable '%s' was not found! " % variable.lower())
++    sys.stderr.write("The determined value was '%s'\n" % value)
++    sys.stderr.write("Either put it on the 'PATH' or set the environment ")
++    sys.stderr.write("variable '%s' pointing to the executable.\n\n" % variable)
++    sys.exit(1)
++
++arguments = sys.argv[1:]
++if DEBUG:
++  print ("\n Start parsing the command line:")
++  print ("   '%s'" % (" ".join(arguments)))
++
++
++if '/dev/null' in arguments or 'conftest.c' in arguments or '--version' in arguments or 'CMakeTmp' in arguments or 'testCCompiler.c' in arguments:
++  sys.stderr.write("\nCONFIGURE IS RUNNING:\n------\n")
++  sys.stderr.write("Call %s (%s) %s\n" % (COMPILER, variables[COMPILER], ' '.join(arguments)))
++  retcode = call(variables[COMPILER], arguments)
++  if DEBUG:
++    sys.stderr.write("     Retcode: %i\n" % retcode)
++  sys.exit(retcode)
++
++output_name = None
++input_names = []
++output_name_add_ending = False
++output_kind = None
++
++
++if DEBUG:
++  print ("\n   Test for input files:")
++
++skip_next   = False
++for argument in arguments:
++  if skip_next:
++    skip_next = False
++  elif '-o' == argument:
++    skip_next = True
++  elif '-I' == argument:
++    skip_next = True
++  elif not argument.startswith('-'):
++    input_names.append(argument)
++
++if DEBUG:
++  print ("     Input files are '%s'" % (' '.join(input_names)))
++
++if not input_names:
++  sys.stderr.write("\nERROR:\n------\n")
++  sys.stderr.write("No input files found\n\n")
++  sys.stderr.write("Call %s (%s)\n" % (COMPILER, variables[COMPILER]))
++  retcode = call(variables[COMPILER], arguments)
++  if DEBUG:
++    print ("     Retcode: %i" % retcode)
++  sys.exit(retcode)
++
++IsResponseFile = False
++if len(input_names) == 1 and input_names[0].startswith("@"):
++    IsResponseFile = True
++    if DEBUG:
++        print ("\n   Got a response file: " + input_names[0])
++
++
++if DEBUG:
++  print ("\n   Test for output file:")
++
++assert(arguments.count('-o') < 2 and "Multiple occurrences of '-o'!")
++if '-o' in arguments:
++  index = arguments.index('-o')
++  assert(len(arguments) > index + 1 and "-o was not followed by any value!")
++  output_name = arguments[index + 1]
++else:
++  if len(input_names) > 1 or IsResponseFile:
++    output_name = 'a.out'
++  else:
++    output_name = input_names[0]
++    output_name_add_ending = True
++
++if DEBUG:
++  print ("     Output file is '%s'" % (output_name))
++  if output_name_add_ending:
++    print ("     -- but the ending might need adjustment!")
++
++if not output_name:
++  sys.stderr.write("\nERROR:\n------\n")
++  sys.stderr.write("No output file found\n\n")
++  sys.stderr.write("Call %s (%s)\n" % (COMPILER, variables[COMPILER]))
++  retcode = call(variables[COMPILER], arguments)
++  if DEBUG:
++    print ("     Retcode: %i" % retcode)
++  sys.exit(retcode)
++
++
++if DEBUG:
++  print ("\n   Test for output kind:")
++
++if '-c' in arguments:
++  if DEBUG:
++    print ("     An intermediate should be emitted!")
++  if '-emit-llvm' in arguments:
++    if DEBUG:
++      print ("     It is already LLVM-IR ('-emit-llvm' is used)!")
++  else:
++    arguments.append('-emit-llvm')
++    if DEBUG:
++      print ("     Add '-emit-llvm' to emit LLVM-IR!")
++  output_kind = 'ir'
++  arguments += ['-mllvm', '-disable-llvm-optzns']
++  if output_name.endswith('.o'):
++      new_output_name = output_name[:-2] + '.bc'
++      arguments[arguments.index(output_name)] = new_output_name
++      output_name = new_output_name
++      if DEBUG:
++        print ("       Change output name to '%s'!" % (new_output_name))
++  # if output_name_add_ending:
++      # if '.' in output_name:
++        # arguments += ['-o', '%s.o' % output_name[:output_name.index('.')]]
++      # else:
++        # arguments += ['-o', '%s.o' % output_name]
++else:
++  if '-emit-llvm' in arguments:
++    if DEBUG:
++      print ("     It is already LLVM-IR ('-emit-llvm' is used)!")
++    output_kind = 'ir'
++    arguments += ['-mllvm', '-disable-llvm-optzns']
++  else:
++    if DEBUG:
++      print ("     An executable is emitted!")
++    output_kind = 'ex'
++    if output_name_add_ending:
++      new_output_name = 'a.out'
++      arguments[arguments.index(output_name)] = new_output_name
++      output_name = new_output_name
++      if DEBUG:
++        print ("       Change output name to '%s'!" % (new_output_name))
++
++
++if DEBUG:
++  print ("\n   Replace common flags:")
++
++original_arguments = arguments[:]
++no_replacements = 0
++for index in range(len(arguments)):
++  argument = arguments[index]
++  if argument in flag_replacements:
++    new_argument = flag_replacements[argument]
++    arguments[index] = ''
++    arguments += new_argument.split(" ")
++    no_replacements += 1
++    if DEBUG:
++      print ("     Replace '%s' by '%s'!" % (argument, new_argument))
++
++if DEBUG and no_replacements == 0:
++  print ("     Nothing found to replace!")
++
++if output_kind == 'ir':
++
++  clang_arguments = arguments
++  if DEBUG:
++    print ("\n   Initiate %s (%s):" % (COMPILER, variables[COMPILER]))
++    print ("     Options: '%s'" % ' '.join(clang_arguments))
++  retcode = call(variables[COMPILER], clang_arguments)
++  if DEBUG:
++    print ("     Retcode: %i" % retcode)
++
++elif output_kind == 'ex' and len(input_names) == 1 and not IsResponseFile:
++  if input_names[0].endswith('.o'):
++    arguments[arguments.index(input_names[0])] = input_names[0][:-2] + ".bc"
++    if DEBUG:
++        print ("\n   Initiate %s (%s):" % (COMPILER, variables[COMPILER]))
++        print ("     Options: '%s'" % ' '.join(arguments))
++    retcode = call(variables[COMPILER], arguments)
++    if DEBUG:
++        print ("     Retcode: %i" % retcode)
++  else:
++    clang_output_name = no_ext(output_name) + '.bc'
++    clang_arguments = arguments + ['-emit-llvm', '-c']
++    clang_arguments[clang_arguments.index(output_name)] = clang_output_name
++    if DEBUG:
++        print ("\n   Initiate %s (%s):" % (COMPILER, variables[COMPILER]))
++        print ("     Options: '%s'" % ' '.join(clang_arguments))
++    retcode = call(variables[COMPILER], clang_arguments)
++    if DEBUG:
++        print ("     Retcode: %i" % retcode)
++    arguments[arguments.index(input_names[0])] = clang_output_name
++    if DEBUG:
++        print ("\n   Initiate %s (%s):" % (COMPILER, variables[COMPILER]))
++        print ("     Options: '%s'" % ' '.join(arguments))
++    retcode = call(variables[COMPILER], arguments)
++    if DEBUG:
++        print ("     Retcode: %i" % retcode)
++
++elif output_kind == 'ex' and len(input_names) > 1 or IsResponseFile:
++
++  ex_arguments = original_arguments
++  linked_output_name = no_ext(output_name) + '-linked.bc'
++  link_arguments = []
++  if IsResponseFile:
++    ex_arguments.remove(input_names[0])
++    link_arguments.append(input_names[0])
++    retcode = call("sed", ["--in-place=.orig",
++                           "-e", "s@\\.o[[:blank:]]@\\.bc @g",
++                           "-e", "s@\\.o$@\\.bc@", input_names[0][1:]])
++    if DEBUG:
++        print ("     Retcode: %i" % retcode)
++  else:
++    for name in input_names:
++        ex_arguments.remove(name)
++        if name.endswith('.o'):
++            link_arguments.append(name[:-2] + ".bc")
++        else:
++            link_arguments.append(name)
++  link_arguments += ['-o', linked_output_name]
++  if DEBUG:
++    print ("\n   Initiate LLVM_LINK (%s):" % variables['LLVM_LINK'])
++    print ("     Options: '%s'" % ' '.join(link_arguments))
++  retcode = call(variables['LLVM_LINK'], link_arguments)
++  if DEBUG:
++    print ("     Retcode: %i" % retcode)
++
++  ex_arguments.append(linked_output_name)
++  if os.getenv('LINK_CFLAGS'):
++      if DEBUG:
++          print("    Got LINK_CFLAGS: ", os.getenv('LINK_CFLAGS'))
++      if ' ' in os.getenv('LINK_CFLAGS'):
++        ex_arguments += os.getenv('LINK_CFLAGS').split(' ')
++      else:
++        ex_arguments.append(os.getenv('LINK_CFLAGS'))
++  if DEBUG:
++    print ("\n   Initiate %s (%s):" % (COMPILER, variables[COMPILER]))
++    print ("     Options: '%s'" % ' '.join(ex_arguments))
++  retcode = call(variables[COMPILER], ex_arguments)
++  if DEBUG:
++    print ("     Retcode: %i" % retcode)
++  if int(retcode) is not 0:
++    i  = random.randint(0, 1000)
++    fn = '/tmp/failure%i' % (i)
++    if DEBUG:
++        print("WRITE FAILURE DETAILS TO %s" % fn)
++    fd = open(fn, 'w')
++    fd.write('cd %s ; %s %s\n' % (os.path.abspath(os.curdir), variables[COMPILER],' '.join(ex_arguments)))
++    fd.close()
++else:
++  assert(False and "Unknown output kind" and output_kind)
++
++sys.exit(retcode)
++
++
++# vim: set ft=python
+diff --git a/utils/llvm_bc_generator++ b/utils/llvm_bc_generator++
+new file mode 120000
+index 0000000..43823a6
+--- /dev/null
++++ b/utils/llvm_bc_generator++
+@@ -0,0 +1 @@
++llvm_bc_generator
+\ No newline at end of file
+-- 
+1.8.3.1
+

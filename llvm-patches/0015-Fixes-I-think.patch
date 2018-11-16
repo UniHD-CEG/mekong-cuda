@@ -1,0 +1,206 @@
+From ccec53b99bbb0a65d66d6ee052761db666cf30e0 Mon Sep 17 00:00:00 2001
+From: Johannes Doerfert <johannes@jdoerfert.de>
+Date: Thu, 26 Jul 2018 16:42:24 +0200
+Subject: [PATCH 15/29] Fixes, I think
+
+---
+ include/llvm/Analysis/PValue.h               |  2 +-
+ include/llvm/Analysis/PolyhedralAccessInfo.h |  6 -----
+ include/llvm/Analysis/PolyhedralValueInfo.h  |  1 +
+ lib/Analysis/PValue.cpp                      |  4 ++--
+ lib/Analysis/PolyhedralAccessInfo.cpp        |  2 +-
+ lib/Analysis/PolyhedralExpressionBuilder.cpp | 34 +++++++++++++++++++++++-----
+ 6 files changed, 33 insertions(+), 16 deletions(-)
+
+diff --git a/include/llvm/Analysis/PValue.h b/include/llvm/Analysis/PValue.h
+index 2d98660..c2a9dab 100644
+--- a/include/llvm/Analysis/PValue.h
++++ b/include/llvm/Analysis/PValue.h
+@@ -43,9 +43,9 @@ template <typename PVType> struct PVLess {
+ };
+ 
+ class PVBase {
++  friend class PVCtx;
+   friend class PVAff;
+   friend class PVMap;
+-  friend class PVCtx;
+   friend class PVSet;
+   friend class PVId;
+ 
+diff --git a/include/llvm/Analysis/PolyhedralAccessInfo.h b/include/llvm/Analysis/PolyhedralAccessInfo.h
+index 4f8d350..f0600d2 100644
+--- a/include/llvm/Analysis/PolyhedralAccessInfo.h
++++ b/include/llvm/Analysis/PolyhedralAccessInfo.h
+@@ -32,12 +32,6 @@ class PolyhedralExpressionBuilder;
+ class PACC {
+ public:
+ 
+-  enum ScopeKind {
+-    SK_FUNCTION,
+-    SK_LOOP,
+-    SK_ITERATION,
+-  };
+-
+   enum AccessKind {
+     AK_READ,
+     AK_WRITE,
+diff --git a/include/llvm/Analysis/PolyhedralValueInfo.h b/include/llvm/Analysis/PolyhedralValueInfo.h
+index 30a94c4..78cb889 100644
+--- a/include/llvm/Analysis/PolyhedralValueInfo.h
++++ b/include/llvm/Analysis/PolyhedralValueInfo.h
+@@ -277,6 +277,7 @@ public:
+   ///               even if they do not vary for one iteration of the @p Scope.
+   bool isVaryingInScope(Instruction &I, const Region &RegionScope, bool Strict,
+                         bool NoAlias = false) const;
++
+   /// Return true if @p I is (potentialy) varying in @p Scope.
+   ///
+   /// @param I      The instruction to be checked.
+diff --git a/lib/Analysis/PValue.cpp b/lib/Analysis/PValue.cpp
+index d81c151..9ab7e11 100644
+--- a/lib/Analysis/PValue.cpp
++++ b/lib/Analysis/PValue.cpp
+@@ -24,8 +24,8 @@
+ 
+ using namespace llvm;
+ 
+-static int DOMAIN_N_BASIC_SEK_TRESHOLD = 8;
+-static int PWA_N_PIECE_TRESHOLD = 4;
++static int DOMAIN_N_BASIC_SEK_TRESHOLD = 10;
++static int PWA_N_PIECE_TRESHOLD = 8;
+ 
+ 
+ static void replace(std::string &str, const std::string &find,
+diff --git a/lib/Analysis/PolyhedralAccessInfo.cpp b/lib/Analysis/PolyhedralAccessInfo.cpp
+index f2a7f07..66d6dcb 100644
+--- a/lib/Analysis/PolyhedralAccessInfo.cpp
++++ b/lib/Analysis/PolyhedralAccessInfo.cpp
+@@ -544,7 +544,7 @@ const PACC *PolyhedralAccessInfo::getAsAccess(Instruction &Inst, Value &Pointer,
+   const PEXP *PointerPE = PI.getPEXP(&Pointer, Scope);
+ 
+   SmallVector<Value *, 4> Parameters;
+-  PI.getParameters(PointerPE, Parameters);
++  PI.getParameters(PointerPE, Parameters, false);
+ 
+   Value *PtrVal = nullptr;
+   for (Value *Parameter : Parameters) {
+diff --git a/lib/Analysis/PolyhedralExpressionBuilder.cpp b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+index 91e0f8a..99066c3 100644
+--- a/lib/Analysis/PolyhedralExpressionBuilder.cpp
++++ b/lib/Analysis/PolyhedralExpressionBuilder.cpp
+@@ -242,6 +242,7 @@ bool PolyhedralExpressionBuilder::getEdgeCondition(PVSet &EdgeCondition,
+ 
+   auto *TermPE = getTerminatorPEXP(PredBB);
+   if (!TermPE || PI.isNonAffine(TermPE)) {
++    DEBUG(dbgs() << "Terminator of " << PredBB.getName() << " is non-affine ["<<TermPE<<"]!\n");
+     return false;
+   }
+ 
+@@ -421,8 +422,13 @@ PEXP *PolyhedralExpressionBuilder::getDomain(BasicBlock &BB) {
+     for (auto *SuccBB : successors(ExitingBB))
+       if (!L->contains(SuccBB)) {
+         PVSet DomainOnEdge;
+-        if (!getDomainOnEdge(DomainOnEdge, *ExitingBBDomainPE, *SuccBB) ||
+-            DomainOnEdge.isComplex()) {
++        if (!getDomainOnEdge(DomainOnEdge, *ExitingBBDomainPE, *SuccBB)) {
++          DEBUG(dbgs() << "coud not build domain on edge from " << SuccBB->getName() << "\n");
++          ForgetDomainsInLoop(*L);
++          return PE->invalidate();
++        }
++        if (DomainOnEdge.isComplex()) {
++          DEBUG(dbgs() << "Domain on edge from " << SuccBB->getName() << " too complex!\n");
+           ForgetDomainsInLoop(*L);
+           return PE->invalidate();
+         }
+@@ -481,8 +487,10 @@ bool PolyhedralExpressionBuilder::getDomainOnEdge(PVSet &DomainOnEdge,
+   auto &PredBB = *cast<BasicBlock>(PredDomPE.getValue());
+ 
+   PVSet EdgeCondition;
+-  if (!getEdgeCondition(EdgeCondition, PredBB, BB))
++  if (!getEdgeCondition(EdgeCondition, PredBB, BB)) {
++    DEBUG(dbgs() << "invalid edge condition " << PredBB.getName() << " -> " << BB.getName() << "\n");
+     return false;
++  }
+ 
+   PVSet PredDomain = PredDomPE.getDomain();
+   DEBUG(dbgs() << "Pred: " << PredBB.getName() << "\nBB: " << BB.getName()
+@@ -552,8 +560,10 @@ PEXP *PolyhedralExpressionBuilder::visit(Value &V) {
+ 
+   assert(PE && PE->isInitialized());
+ 
+-  if (PE->getPWA().isComplex())
++  if (PE->getPWA().isComplex()) {
++    DEBUG(dbgs() << "Invalidate complex PE: " << PE << "\n");
+     PE->invalidate();
++  }
+ 
+   if (PI.isAffine(PE))
+     NUM_EXPRESSIONS++;
+@@ -777,7 +787,7 @@ PEXP *PolyhedralExpressionBuilder::visitICmpInst(ICmpInst &I) {
+   combine(PE, LPE);
+   combine(PE, RPE);
+   PE->Kind = PEXP::EK_INTEGER;
+-  DEBUG(dbgs() << PE << "\n");
++  DEBUG(dbgs()<< "ICMPPE: " << PE << "\n");
+   return PE;
+ }
+ 
+@@ -801,6 +811,10 @@ PolyhedralExpressionBuilder::visitGetElementPtrInst(GetElementPtrInst &I) {
+   *PE = *PtrPE;
+   if (!adjustDomainDimensions(PE->PWA, PtrPE, PE, true))
+     return visitParameter(I);
++  if (!adjustDomainDimensions(PE->InvalidDomain, PtrPE, PE, true))
++    return visitParameter(I);
++  if (!adjustDomainDimensions(PE->KnownDomain, PtrPE, PE, true))
++    return visitParameter(I);
+ 
+   auto *Ty = I.getPointerOperandType();
+   for (auto &Op : make_range(I.idx_begin(), I.idx_end())) {
+@@ -1034,6 +1048,9 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+   if (!IsLoopHeader)
+     return visitConditionalPHINode(I);
+ 
++  if (Scope == L)
++    return visitParameter(I);
++
+   unsigned NumLatches = L->getNumBackEdges();
+   if (NumLatches > 1) {
+     DEBUG(dbgs() << "TODO revisit multiple latch loops!\n");
+@@ -1218,6 +1235,8 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+   PE->PWA.dropParameter(Id);
+   setScope(OldScope);
+ 
++  DEBUG(dbgs() << "Pre Init Ops: " << PE->PWA << "\n");
++
+   for (unsigned u = 0, e = I.getNumIncomingValues(); u != e; u++) {
+     auto *OpBB = I.getIncomingBlock(u);
+     if (L->contains(OpBB))
+@@ -1230,6 +1249,7 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+     }
+ 
+     PVAff OpAff = OpPE->getPWA();
++    DEBUG(dbgs() << "Init Op: " << OpAff << "\n");
+     assert(e > NumLatches);
+     if (e - NumLatches > 1 || OtherPHIs) {
+       PEXP *OpBBDomPE = getDomain(*OpBB);
+@@ -1240,7 +1260,7 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+         return visitParameter(I);
+       }
+ 
+-      EdgeDom.fixInputDim(LoopDim - 1, 0);
++      //EdgeDom.fixInputDim(LoopDim - 1, 0);
+       OpAff.intersectDomain(EdgeDom);
+     }
+ 
+@@ -1249,6 +1269,8 @@ PEXP *PolyhedralExpressionBuilder::visitPHINode(PHINode &I) {
+     combine(PE, OpPE);
+   }
+ 
++  DEBUG(dbgs() << "Init Ops: " << PE->PWA << "\n");
++
+   if (NegationSet) {
+     DEBUG(dbgs() << "Negate back value for negation set: " << NegationSet
+                  << "\n");
+-- 
+1.8.3.1
+
