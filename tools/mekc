@@ -77,7 +77,7 @@ function parse()
   app:add_option('flag', 'last', {'-'}, 'g', nil, 'Include debug info.')
 
   app:add_option('joined', 'last', {'-'}, 'O', nil, 'Optimization level.')
-  app:add_option('joinsep', 'last', {'-'}, 'D', nil, 'Define Macro.')
+  app:add_option('joinsep', 'list', {'-'}, 'D', nil, 'Define Macro.')
   app:add_option('joined', 'once', {'-', '--'}, 'std=', 'std', 'Language standard.', '<version>')
 
   app:add_option('joinsep', 'list', {'-'}, 'I', nil, 'Add directory to include search path.', '<dir>')
