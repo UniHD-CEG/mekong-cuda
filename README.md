@@ -12,6 +12,8 @@ together with a high productivity and performance.
 
 Homepage: [www.gpumekong.org](www.gpumekong.org)
 
+Note: this is work in progress
+
 # Installation
 
 GPU Mekong is an external project to LLVM/clang, so for the most part follow
@@ -64,7 +66,6 @@ of the mekong system, and therefore the application, at runtime.
 - `MELOGLEVEL`. Set to numbers `0` to `8` to enable logging. Currently only
   log levels `3` through `7` are in use. Higher numbers correspond to more
   detailed, verbose logging.
-- `MEUNSAFE`. Mekong defaults to the conservative approach of creating internal copies of host
-  buffers to avoid WAR conflicts between the time of `cudaMemcpy`s and kernel launches.
-  If there are guaranteed no writes to the host buffer during this time, unsafe mode might
-  be enabled to improve performance. Enable with `MEUNSAFE=yes`.
+- `MEDEBUG`. Can be set to `notransfers` to disable all transfers for buffer
+  synchronization or `nopatterns` to disable memory access patterns and
+  transfers. These options are used for timing analysis.
