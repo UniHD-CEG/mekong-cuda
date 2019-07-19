@@ -10,7 +10,7 @@ programs combined with message passing are required. As a result, we can
 maintain the simplicity and efficiency of GPU computing in the scale-out case,
 together with a high productivity and performance.
 
-Homepage: [www.gpumekong.org](www.gpumekong.org)
+Homepage: [www.gpumekong.org](http://www.gpumekong.org)
 
 Note: this is work in progress
 
